@@ -273,6 +273,7 @@ export class Ocean {
                 uFoamCoverage: { value: config.foamCoverage },
                 uWaterContrast: { value: config.waterContrast },
                 uWindDir: { value: getters.windVector },
+                uCrestLean: { value: config.crestLean },
                 uSkyHorizon: { value: getters.skyHorizonColor },
                 uSkyZenith: { value: getters.skyZenithColor },
                 uFogDensity: { value: config.fogDensity },
@@ -580,6 +581,7 @@ export class Ocean {
             u.uFoamCoverage.value = config.foamCoverage;
             u.uWaterContrast.value = config.waterContrast;
             u.uWindDir.value.copy(getters.windVector);
+            u.uCrestLean.value = config.crestLean;
             u.uSkyHorizon.value.setHex(config.skyColorHorizon);
             u.uSkyZenith.value.setHex(config.skyColorZenith);
             u.uFogDensity.value = config.fogDensity;

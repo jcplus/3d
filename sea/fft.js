@@ -351,7 +351,12 @@ export class FFTOcean {
                     vec3 zm = spatial(px - ivec2(0, 1));
 
                     float ds = uPatch / uN;
-                    float hc = uHeightScale * uChoppiness;
+                    // Tessendorf's choppy displacement uses x' = x + lambda*D with
+                    // lambda NEGATIVE: points draw toward the crests, giving sharp
+                    // crests and broad troughs. A positive sign inverts the
+                    // trochoid (sharp troughs, flat crests). The same sign feeds
+                    // the Jacobian so folding stays on the crests where it belongs.
+                    float hc = -uHeightScale * uChoppiness;
                     float dDxdx = (xp.x - xm.x) * hc / (2.0 * ds);
                     float dDzdz = (zp.y - zm.y) * hc / (2.0 * ds);
                     float dDxdz = (zp.x - zm.x) * hc / (2.0 * ds);
