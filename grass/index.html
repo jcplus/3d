@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Grass from Grayscale</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Load Three.js (Global build) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Load OrbitControls (Global build compatible with r128) -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+    <div id="ui-container">
+        <h1>3D Grass Generator</h1>
+        <p>Upload a grayscale image to generate terrain.</p>
+        <input type="file" id="image-upload" accept="image/*">
+        <div class="controls-info">
+            <p><strong>Wind Control:</strong></p>
+            <div class="control-group">
+                <label for="wind-force">Force (0-5): <span id="wind-force-val">1</span></label>
+                <input type="range" id="wind-force" min="0" max="5" value="1" step="0.1">
+            </div>
+            <div class="control-group">
+                <label for="wind-angle">Angle (0°-359°): <span id="wind-angle-val">0°</span></label>
+                <input type="range" id="wind-angle" min="0" max="359" value="0" step="1">
+            </div>
+            <p><strong>Controls:</strong></p>
+            <ul>
+                <li>Left Click: Rotate (Disabled, use Right Click)</li>
+                <li>Right Click: Rotate View</li>
+                <li>Scroll: Zoom (1m - 100m)</li>
+                <li>WASD / Arrows: Pan View</li>
+            </ul>
+        </div>
+    </div>
+    <script src="main.js"></script>
+</body>
+</html>

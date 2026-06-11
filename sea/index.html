@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Ocean Simulation</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            overflow: hidden;
+            background: #000;
+        }
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #00aaff;
+            font-family: Arial, sans-serif;
+            font-size: 18px;
+            pointer-events: none;
+            transition: opacity 0.5s;
+        }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: #fff;
+            font-family: monospace;
+            font-size: 12px;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="canvas-container"></div>
+    <div id="loading">Loading Ocean Simulation...</div>
+    <div id="info">
+        WASD: Move | Mouse: Look | Scroll: Zoom<br>
+        WebGL 2.0 iFFT Ocean Simulation
+    </div>
+
+    <!-- Three.js from CDN -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+
+    <!-- Shader Chunks for GPGPU -->
+    <script type="x-shader/x-fragment" id="compute-vertex">
+        void main() {
+            gl_Position = vec4(position, 1.0);
+        }
+    </script>
+
+    <!-- Ocean Surface Shaders -->
+    <script type="x-shader/x-vertex" id="ocean-vertex">
+        uniform sampler2D uDisplacementMap;
+        uniform float uTime;
+        
+        varying vec3 vWorldPosition;
+        varying vec3 vNormal;
+        varying vec2 vUv;
+        varying float vDisplacement;
+        varying float vFoam;
+
+        void main() {
+            vUv = uv;
+            
+            // Read displacement data (RGB = XYZ displacement, A = Jacobian/foam)
+            vec4 data = texture2D(uDisplacementMap, uv);
+            vec3 displacement = data.rgb;
+            
+            // Apply displacement to vertices
+            // Note: displacement from sea.js is already the final world offset; no need to multiply by uChoppiness
+            vec3 newPosition = position + displacement;
+            
+            vec4 worldPosition = modelMatrix * vec4(newPosition, 1.0);
+            vWorldPosition = worldPosition.xyz;
+            vDisplacement = displacement.y;
+            vFoam = 1.0 - data.a; // Jacobian < 1 is compressed
+            
+            // === Real-time normal calculation ===
+            // Sample neighbouring pixels to calculate normals; sharper than precomputed normal maps
+            float texelSize = 1.0 / 256.0; // assume resolution 256
+            vec3 pRight = texture2D(uDisplacementMap, uv + vec2(texelSize, 0.0)).rgb;
+            vec3 pDown  = texture2D(uDisplacementMap, uv + vec2(0.0, texelSize)).rgb;
+            
+            // Base grid spacing (gridSize / resolution)
+            float gridStep = 1000.0 / 256.0; 
+            
+            // Calculate tangent vectors
+            // Original position difference (gridStep) + displacement difference
+            vec3 vRight = vec3(gridStep, 0.0, 0.0) + (pRight - displacement);
+            vec3 vDown  = vec3(0.0, 0.0, gridStep) + (pDown - displacement);
+            
+            vNormal = normalize(cross(vDown, vRight));
+            
+            gl_Position = projectionMatrix * viewMatrix * worldPosition;
+        }
+    </script>
+
+    <script type="x-shader/x-fragment" id="ocean-fragment">
+        uniform vec3 uWaterColorDeep;
+        uniform vec3 uWaterColorShallow;
+        uniform vec3 uSunPosition;
+        uniform vec3 uCameraPosition;
+        uniform sampler2D uFoamTexture;
+        uniform float uFoamThreshold;
+        uniform float uTime;
+        
+        varying vec3 vWorldPosition;
+        varying vec3 vNormal;
+        varying vec2 vUv;
+        varying float vDisplacement;
+        
+        // Simplex noise function for detail
+        vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+        vec2 mod289(vec2 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+        vec3 permute(vec3 x) { return mod289(((x*34.0)+1.0)*x); }
+        
+        float snoise(vec2 v) {
+            const vec4 C = vec4(0.211324865405187, 0.366025403784439,
+                               -0.577350269189626, 0.024390243902439);
+            vec2 i  = floor(v + dot(v, C.yy));
+            vec2 x0 = v - i + dot(i, C.xx);
+            vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+            vec4 x12 = x0.xyxy + C.xxzz;
+            x12.xy -= i1;
+            i = mod289(i);
+            vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0))
+                           + i.x + vec3(0.0, i1.x, 1.0));
+            vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy),
+                                   dot(x12.zw,x12.zw)), 0.0);
+            m = m*m; m = m*m;
+            vec3 x = 2.0 * fract(p * C.www) - 1.0;
+            vec3 h = abs(x) - 0.5;
+            vec3 ox = floor(x + 0.5);
+            vec3 a0 = x - ox;
+            m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
+            vec3 g;
+            g.x = a0.x * x0.x + h.x * x0.y;
+            g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+            return 130.0 * dot(m, g);
+        }
+        
+        void main() {
+            vec3 viewDir = normalize(uCameraPosition - vWorldPosition);
+            vec3 sunDir = normalize(uSunPosition);
+            
+            // Fresnel effect
+            float fresnel = pow(1.0 - max(dot(viewDir, vNormal), 0.0), 5.0);
+            fresnel = mix(0.02, 1.0, fresnel);
+            
+            // Water color mixing based on depth and view angle
+            float scatter = max(dot(viewDir, -vNormal), 0.0);
+            vec3 waterColor = mix(uWaterColorDeep, uWaterColorShallow, scatter * 0.5 + 0.5);
+            
+            // Specular highlight
+            vec3 halfDir = normalize(viewDir + sunDir);
+            float specAngle = max(dot(vNormal, halfDir), 0.0);
+            float specular = pow(specAngle, 128.0) * 0.8;
+            
+            // Foam
+            float foam = texture2D(uFoamTexture, vUv).r;
+            foam = smoothstep(uFoamThreshold, 1.0, foam);
+            
+            // Add procedural bubble noise to foam
+            float bubbleNoise = snoise(vUv * 50.0 + uTime * 0.5) * 0.5 + 0.5;
+            foam *= mix(0.7, 1.0, bubbleNoise);
+            
+            // Subsurface scattering at wave tips
+            float sss = max(dot(viewDir, -sunDir), 0.0);
+            sss = pow(sss, 2.0) * max(vDisplacement, 0.0) * 0.5;
+            vec3 sssColor = vec3(0.0, 0.4, 0.3) * sss;
+            
+            // Combine colors
+            vec3 finalColor = waterColor * (1.0 - fresnel * 0.5);
+            finalColor += vec3(specular);
+            finalColor = mix(finalColor, vec3(1.0), foam);
+            finalColor += sssColor;
+            
+            // Distance fog
+            float dist = length(vWorldPosition - uCameraPosition);
+            float fogFactor = exp(-dist * 0.001);
+            finalColor = mix(vec3(0.6, 0.8, 0.95), finalColor, fogFactor);
+            
+            gl_FragColor = vec4(finalColor, 0.9 + fresnel * 0.1);
+        }
+    </script>
+
+    <!-- Seabed Shaders -->
+    <script type="x-shader/x-vertex" id="seabed-vertex">
+        uniform float uSeabedLevel;
+        uniform float uTime;
+        
+        varying vec3 vWorldPosition;
+        varying vec3 vNormal;
+        varying float vHeight;
+        
+        // Simplex noise
+        vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+        vec2 mod289(vec2 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+        vec3 permute(vec3 x) { return mod289(((x*34.0)+1.0)*x); }
+        
+        float snoise(vec2 v) {
+            const vec4 C = vec4(0.211324865405187, 0.366025403784439,
+                               -0.577350269189626, 0.024390243902439);
+            vec2 i  = floor(v + dot(v, C.yy));
+            vec2 x0 = v - i + dot(i, C.xx);
+            vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+            vec4 x12 = x0.xyxy + C.xxzz;
+            x12.xy -= i1;
+            i = mod289(i);
+            vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0))
+                           + i.x + vec3(0.0, i1.x, 1.0));
+            vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy),
+                                   dot(x12.zw,x12.zw)), 0.0);
+            m = m*m; m = m*m;
+            vec3 x = 2.0 * fract(p * C.www) - 1.0;
+            vec3 h = abs(x) - 0.5;
+            vec3 ox = floor(x + 0.5);
+            vec3 a0 = x - ox;
+            m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
+            vec3 g;
+            g.x = a0.x * x0.x + h.x * x0.y;
+            g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+            return 130.0 * dot(m, g);
+        }
+        
+        float fbm(vec2 p) {
+            float value = 0.0;
+            float amplitude = 0.5;
+            float frequency = 1.0;
+            for(int i = 0; i < 5; i++) {
+                value += amplitude * snoise(p * frequency);
+                amplitude *= 0.5;
+                frequency *= 2.0;
+            }
+            return value;
+        }
+        
+        void main() {
+            vec2 worldPos = (modelMatrix * vec4(position, 1.0)).xz;
+            
+            // Fractal Brownian Motion for terrain
+            float height = fbm(worldPos * 0.01);
+            height = height * 20.0 + uSeabedLevel;
+            
+            vec3 newPosition = position;
+            newPosition.y = height;
+            
+            vec4 worldPosition = modelMatrix * vec4(newPosition, 1.0);
+            vWorldPosition = worldPosition.xyz;
+            vHeight = height;
+            
+            // Calculate normal from height derivatives
+            float eps = 1.0;
+            float hL = fbm((worldPos - vec2(eps, 0.0)) * 0.01) * 20.0;
+            float hR = fbm((worldPos + vec2(eps, 0.0)) * 0.01) * 20.0;
+            float hD = fbm((worldPos - vec2(0.0, eps)) * 0.01) * 20.0;
+            float hU = fbm((worldPos + vec2(0.0, eps)) * 0.01) * 20.0;
+            
+            vNormal = normalize(vec3(hL - hR, 2.0 * eps, hD - hU));
+            
+            gl_Position = projectionMatrix * viewMatrix * worldPosition;
+        }
+    </script>
+
+    <script type="x-shader/x-fragment" id="seabed-fragment">
+        uniform vec3 uCameraPosition;
+        uniform float uSeaLevel;
+        uniform float uTime;
+        
+        varying vec3 vWorldPosition;
+        varying vec3 vNormal;
+        varying float vHeight;
+        
+        // Voronoi noise for caustics
+        vec2 hash2(vec2 p) {
+            return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)))) * 43758.5453);
+        }
+        
+        float voronoi(vec2 x) {
+            vec2 n = floor(x);
+            vec2 f = fract(x);
+            float md = 8.0;
+            for(int j = -1; j <= 1; j++) {
+                for(int i = -1; i <= 1; i++) {
+                    vec2 g = vec2(float(i), float(j));
+                    vec2 o = hash2(n + g);
+                    o = 0.5 + 0.5 * sin(uTime * 0.5 + 6.2831 * o);
+                    vec2 r = g + o - f;
+                    float d = dot(r, r);
+                    md = min(md, d);
+                }
+            }
+            return md;
+        }
+        
+        // Triplanar mapping helper
+        vec4 triplanarSample(vec3 pos, vec3 normal, vec4 cX, vec4 cY, vec4 cZ) {
+            vec3 blend = abs(normal);
+            blend = max(blend - 0.2, 0.0);
+            blend /= blend.x + blend.y + blend.z;
+            return cX * blend.x + cY * blend.y + cZ * blend.z;
+        }
+        
+        void main() {
+            // Base colors
+            vec3 sandColor = vec3(0.76, 0.70, 0.50);
+            vec3 rockColor = vec3(0.35, 0.35, 0.35);
+            vec3 deepColor = vec3(0.1, 0.15, 0.2);
+            
+            // Mix based on height and slope
+            float slope = 1.0 - abs(vNormal.y);
+            vec3 baseColor = mix(sandColor, rockColor, slope);
+            
+            // Caustics projection
+            vec2 causticCoord = vWorldPosition.xz * 0.1;
+            float caustics = voronoi(causticCoord);
+            caustics = pow(1.0 - caustics, 3.0) * 0.8;
+            
+            // Domain warp for animated caustics
+            vec2 warp = vec2(
+                sin(causticCoord.y * 2.0 + uTime * 0.5) * 0.2,
+                cos(causticCoord.x * 2.0 + uTime * 0.3) * 0.2
+            );
+            float caustics2 = voronoi(causticCoord + warp);
+            caustics2 = pow(1.0 - caustics2, 2.0) * 0.5;
+            
+            caustics = max(caustics, caustics2);
+            
+            // Add caustics
+            baseColor += vec3(0.3, 0.5, 0.6) * caustics;
+            
+            // Depth fog / absorption
+            float depth = uSeaLevel - vWorldPosition.y;
+            float absorption = exp(-depth * 0.02);
+            baseColor = mix(deepColor, baseColor, absorption);
+            
+            // Distance fog
+            float dist = length(vWorldPosition - uCameraPosition);
+            float fogFactor = exp(-dist * 0.002);
+            baseColor = mix(vec3(0.3, 0.5, 0.7), baseColor, fogFactor);
+            
+            // Simple lighting
+            vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
+            float diff = max(dot(vNormal, lightDir), 0.0);
+            baseColor *= (0.3 + 0.7 * diff);
+            
+            gl_FragColor = vec4(baseColor, 1.0);
+        }
+    </script>
+
+    <!-- Main Application -->
+    <script type="module" src="main.js"></script>
+</body>
+</html>
