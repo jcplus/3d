@@ -4,11 +4,16 @@
  * Terrain height is a function of world coordinates, so the mesh can
  * translate freely without the terrain swimming.
  *
- * Version: 0.2.0
+ * The terrain field comes from terrain.js (shared with the shallow-water
+ * solver), injected into the vertex shader at the //__TERRAIN__ marker so the
+ * rendered floor and the simulated bed are identical.
+ *
+ * Version: 0.3.0
  */
 
 import * as THREE from 'three';
 import { config } from './config.js';
+import { TERRAIN_GLSL } from './terrain.js';
 
 export class Seabed {
     constructor(scene) {
@@ -19,7 +24,9 @@ export class Seabed {
     createMesh() {
         // Create seabed matching (or exceeding) the ocean size
         const size = config.gridSize;
-        this.segments = 256;
+        // Denser than the open-sea need so the near-shore beach and tide pool
+        // read cleanly through the seabed mesh
+        this.segments = 320;
         const geometry = new THREE.PlaneGeometry(
             size,
             size,
@@ -28,7 +35,8 @@ export class Seabed {
         );
         geometry.rotateX(-Math.PI / 2);
         
-        const vertexShader = document.getElementById('seabed-vertex').textContent;
+        const vertexShader = document.getElementById('seabed-vertex')
+            .textContent.replace('//__TERRAIN__', TERRAIN_GLSL);
         const fragmentShader = document.getElementById('seabed-fragment').textContent;
         
         this.material = new THREE.ShaderMaterial({

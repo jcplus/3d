@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="version" content="0.3.0">
+    <meta name="version" content="0.4.0">
     <title>Real-Time Ocean Simulation</title>
     <style>
         * {
@@ -74,44 +74,81 @@
         uniform float uGridSize;
         uniform float uGridResolution;
 
+        // Near-shore shallow water (L2) blended over the open-ocean field
+        uniform sampler2D uSweTexture;   // (depth, vx, vz, surfaceY)
+        uniform vec2 uSweOrigin;
+        uniform float uSweSize;
+        uniform float uSweTexel;
+        uniform float uSweEnabled;
+        uniform float uSeaLevel;
+
         varying vec3 vWorldPosition;
         varying vec3 vNormal;
         varying vec2 vUv;
         varying float vDisplacement;
         varying float vFoam;
+        varying float vSweMask;
+        varying float vSweDepth;
+        varying float vSweSpeed;
 
         void main() {
             vUv = uv;
-            
+
             // Read displacement data (RGB = XYZ displacement, A = Jacobian/foam)
             vec4 data = texture2D(uDisplacementMap, uv);
             vec3 displacement = data.rgb;
-            
-            // Apply displacement to vertices
-            // Note: displacement from sea.js is already the final world offset; no need to multiply by uChoppiness
+
+            // Displacement from sea.js is already the final world offset
             vec3 newPosition = position + displacement;
-            
-            vec4 worldPosition = modelMatrix * vec4(newPosition, 1.0);
-            vWorldPosition = worldPosition.xyz;
-            vDisplacement = displacement.y;
-            vFoam = 1.0 - data.a; // Jacobian < 1 is compressed
-            
-            // === Real-time normal calculation ===
-            // Sample neighbouring pixels to calculate normals; sharper than precomputed normal maps
+
+            // === Open-ocean normal from the displacement field ===
             float texelSize = 1.0 / uGridResolution;
             vec3 pRight = texture2D(uDisplacementMap, uv + vec2(texelSize, 0.0)).rgb;
             vec3 pDown  = texture2D(uDisplacementMap, uv + vec2(0.0, texelSize)).rgb;
-
-            // Base grid spacing
             float gridStep = uGridSize / uGridResolution;
-            
-            // Calculate tangent vectors
-            // Original position difference (gridStep) + displacement difference
             vec3 vRight = vec3(gridStep, 0.0, 0.0) + (pRight - displacement);
             vec3 vDown  = vec3(0.0, 0.0, gridStep) + (pDown - displacement);
-            
-            vNormal = normalize(cross(vDown, vRight));
-            
+            vec3 oceanNormal = normalize(cross(vDown, vRight));
+
+            vec4 worldPosition = modelMatrix * vec4(newPosition, 1.0);
+            vec3 normal = oceanNormal;
+            float mask = 0.0;
+            float sweDepth = 0.0;
+            float sweSpeed = 0.0;
+
+            // === Near-shore blend ===
+            // Inside the SWE patch, replace the open-ocean surface with the
+            // shallow-water solution and drop the choppy horizontal swizzle.
+            if (uSweEnabled > 0.5) {
+                vec2 sUv = (worldPosition.xz - uSweOrigin) / uSweSize + 0.5;
+                if (sUv.x > 0.001 && sUv.x < 0.999 && sUv.y > 0.001 && sUv.y < 0.999) {
+                    vec4 sw = texture2D(uSweTexture, sUv);
+                    mask = smoothstep(0.0, 0.09, min(min(sUv.x, 1.0 - sUv.x), min(sUv.y, 1.0 - sUv.y)));
+                    sweDepth = sw.x;
+                    sweSpeed = length(sw.yz);
+
+                    vec3 flatLocal = vec3(position.x, newPosition.y, position.z);
+                    vec3 mixedLocal = mix(newPosition, flatLocal, mask);
+                    vec4 wpFlat = modelMatrix * vec4(mixedLocal, 1.0);
+                    float worldY = mix(worldPosition.y, sw.w, mask);
+                    worldPosition = vec4(wpFlat.x, worldY, wpFlat.z, 1.0);
+
+                    float hX = texture2D(uSweTexture, sUv + vec2(uSweTexel, 0.0)).w;
+                    float hZ = texture2D(uSweTexture, sUv + vec2(0.0, uSweTexel)).w;
+                    float eWorld = uSweSize * uSweTexel;
+                    vec3 sweNormal = normalize(vec3(sw.w - hX, eWorld, sw.w - hZ));
+                    normal = normalize(mix(oceanNormal, sweNormal, mask));
+                }
+            }
+
+            vWorldPosition = worldPosition.xyz;
+            vNormal = normal;
+            vDisplacement = worldPosition.y - uSeaLevel;
+            vFoam = 1.0 - data.a; // Jacobian < 1 is compressed
+            vSweMask = mask;
+            vSweDepth = sweDepth;
+            vSweSpeed = sweSpeed;
+
             gl_Position = projectionMatrix * viewMatrix * worldPosition;
         }
     </script>
@@ -141,6 +178,9 @@
         varying vec2 vUv;
         varying float vDisplacement;
         varying float vFoam;
+        varying float vSweMask;
+        varying float vSweDepth;
+        varying float vSweSpeed;
 
         // Simplex noise function for detail
         vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
@@ -245,6 +285,10 @@
             float veins = pow(vein1 * 0.65 + vein2 * 0.35, 3.0);
             lace *= smoothstep(0.25, 0.75, veins);
 
+            // Near-shore breakers: fast, shallow shallow-water flow turns white
+            float shoreFoam = smoothstep(0.7, 1.8, vSweSpeed) * vSweMask;
+            whitecap = clamp(whitecap + shoreFoam, 0.0, 1.0);
+
             float foamMix = clamp(whitecap + trailing * 0.55 + lace * 0.4, 0.0, 1.0);
             // Foam picks up the scene light: darker on the shadow side
             vec3 foamColor = vec3(0.94, 0.97, 0.98) * (0.55 + 0.45 * lambert);
@@ -261,7 +305,15 @@
             float fogAmt = 1.0 - exp(-dist * uFogDensity * heightFactor);
             finalColor = mix(finalColor, uSkyHorizon, fogAmt);
 
-            gl_FragColor = vec4(finalColor, 0.92 + fresnel * 0.08);
+            // Wet/dry: where the shallow-water column thins to nothing, fade the
+            // surface out so the dry beach (seabed) shows through. Discarding
+            // near-zero alpha avoids writing depth over the sand.
+            float alpha = 0.92 + fresnel * 0.08;
+            float wet = mix(1.0, smoothstep(0.02, 0.3, vSweDepth), vSweMask);
+            alpha *= wet;
+            if (alpha < 0.02) discard;
+
+            gl_FragColor = vec4(finalColor, alpha);
         }
     </script>
 
@@ -269,76 +321,36 @@
     <script type="x-shader/x-vertex" id="seabed-vertex">
         uniform float uSeabedLevel;
         uniform float uTime;
-        
+
         varying vec3 vWorldPosition;
         varying vec3 vNormal;
         varying float vHeight;
-        
-        // Simplex noise
-        vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-        vec2 mod289(vec2 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
-        vec3 permute(vec3 x) { return mod289(((x*34.0)+1.0)*x); }
-        
-        float snoise(vec2 v) {
-            const vec4 C = vec4(0.211324865405187, 0.366025403784439,
-                               -0.577350269189626, 0.024390243902439);
-            vec2 i  = floor(v + dot(v, C.yy));
-            vec2 x0 = v - i + dot(i, C.xx);
-            vec2 i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
-            vec4 x12 = x0.xyxy + C.xxzz;
-            x12.xy -= i1;
-            i = mod289(i);
-            vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0))
-                           + i.x + vec3(0.0, i1.x, 1.0));
-            vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy),
-                                   dot(x12.zw,x12.zw)), 0.0);
-            m = m*m; m = m*m;
-            vec3 x = 2.0 * fract(p * C.www) - 1.0;
-            vec3 h = abs(x) - 0.5;
-            vec3 ox = floor(x + 0.5);
-            vec3 a0 = x - ox;
-            m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
-            vec3 g;
-            g.x = a0.x * x0.x + h.x * x0.y;
-            g.yz = a0.yz * x12.xz + h.yz * x12.yw;
-            return 130.0 * dot(m, g);
-        }
-        
-        float fbm(vec2 p) {
-            float value = 0.0;
-            float amplitude = 0.5;
-            float frequency = 1.0;
-            for(int i = 0; i < 5; i++) {
-                value += amplitude * snoise(p * frequency);
-                amplitude *= 0.5;
-                frequency *= 2.0;
-            }
-            return value;
-        }
-        
+
+        // Shared near-shore terrain field (defines terrainHeight); injected
+        // from terrain.js so the seabed and the SWE bed are identical.
+        //__TERRAIN__
+
         void main() {
             vec2 worldPos = (modelMatrix * vec4(position, 1.0)).xz;
-            
-            // Fractal Brownian Motion for terrain
-            float height = fbm(worldPos * 0.01);
-            height = height * 20.0 + uSeabedLevel;
-            
+
+            float height = terrainHeight(worldPos);
+
             vec3 newPosition = position;
             newPosition.y = height;
-            
+
             vec4 worldPosition = modelMatrix * vec4(newPosition, 1.0);
             vWorldPosition = worldPosition.xyz;
             vHeight = height;
-            
-            // Calculate normal from height derivatives
+
+            // Normal from the terrain height derivatives
             float eps = 1.0;
-            float hL = fbm((worldPos - vec2(eps, 0.0)) * 0.01) * 20.0;
-            float hR = fbm((worldPos + vec2(eps, 0.0)) * 0.01) * 20.0;
-            float hD = fbm((worldPos - vec2(0.0, eps)) * 0.01) * 20.0;
-            float hU = fbm((worldPos + vec2(0.0, eps)) * 0.01) * 20.0;
-            
+            float hL = terrainHeight(worldPos - vec2(eps, 0.0));
+            float hR = terrainHeight(worldPos + vec2(eps, 0.0));
+            float hD = terrainHeight(worldPos - vec2(0.0, eps));
+            float hU = terrainHeight(worldPos + vec2(0.0, eps));
+
             vNormal = normalize(vec3(hL - hR, 2.0 * eps, hD - hU));
-            
+
             gl_Position = projectionMatrix * viewMatrix * worldPosition;
         }
     </script>
@@ -414,7 +426,17 @@
             float depth = uSeaLevel - vWorldPosition.y;
             float absorption = exp(-depth * 0.02);
             baseColor = mix(deepColor, baseColor, absorption);
-            
+
+            // Above the waterline: wet sand near the line, dry sand higher,
+            // dune grass on the upper beach. The ocean surface fades to
+            // transparent here, so this is what the eye actually reads.
+            float aboveT = smoothstep(uSeaLevel - 0.4, uSeaLevel + 1.2, vWorldPosition.y);
+            vec3 wetSand = vec3(0.52, 0.45, 0.33);
+            vec3 drySand = vec3(0.83, 0.75, 0.55);
+            vec3 landColor = mix(wetSand, drySand, smoothstep(uSeaLevel + 0.3, uSeaLevel + 3.5, vWorldPosition.y));
+            landColor = mix(landColor, vec3(0.34, 0.42, 0.24), smoothstep(8.0, 14.0, vWorldPosition.y) * 0.7);
+            baseColor = mix(baseColor, landColor, aboveT);
+
             // Distance fog
             float dist = length(vWorldPosition - uCameraPosition);
             float fogFactor = exp(-dist * 0.002);

@@ -614,6 +614,91 @@ finalColor = mix(finalColor, horizonColor, 1 - exp(-dist * fogDensity * heightFa
 
 ---
 
+## 13. 近岸浅水方程（SWE，M2）
+
+近岸层用浅水方程高度场模拟冲滩回流与孤立水洼晃动，叠加在 L0 大洋涌浪之上。
+求解器选 **虚拟管道模型（virtual pipe / Mei-St'ava）**——GPU 友好、天然守恒质量、
+天然处理干湿格（干格水深为 0、不产生外流），且因外流被钳制在格内可用水量以内而恒非负。
+
+### 13.1 共享地形场（单一事实来源）
+
+海底高程是世界 XZ 的解析函数 `terrainHeight(p)`（`terrain.js` 的 `TERRAIN_GLSL`），
+被注入海底网格 vertex shader（可视）与 SWE 求解器（床面），并在 CPU 侧镜像
+（`terrainHeightJS`）用于初始化水深。三者共用同一场，渲染床面与模拟床面永不打架。
+
+地形 = 远场深海（≈ −130m + fbm）在以原点为心的近岸圆盘内插值到岸滩剖面：
+沿 +x 由海面以下抬升到陆地（海平面 = 世界 y=0），并在上滩面挖一个带凸缘的孤立潮池。
+
+### 13.2 管道模型差分
+
+状态用两张 GPGPU 纹理，每个子步乒乓一次：
+
+```
+textureFlux  = vec4(fE, fW, fN, fS)        // 到 4 邻格的外流体积率
+textureWater = vec4(depth, vx, vz, surfaceY)
+```
+
+记格心水面 `H = b + d`（床面 b + 水深 d），格宽 L，重力 g，子步长 Δt：
+
+```glsl
+// 通量 pass：从上帧通量 + 当前水面梯度更新外流（钳到 ≥0）
+fE = max(0, fE_prev * damp + Δt·g·L·(H_c - H_east));   // 其余方向同理
+// 防止抽干：外流体积不超过格内可用水量
+K = min(1, d·L² / ((fE+fW+fN+fS)·Δt));   fdir *= K;
+```
+
+```glsl
+// 水深 pass：净通量更新水深（管道模型天然守恒）
+inflow  = 西格.fE + 东格.fW + 南格.fN + 北格.fS;
+outflow = fE + fW + fN + fS;
+d_new   = max(0, d + Δt·(inflow - outflow) / L²);
+```
+
+速度（供泡沫/着色）由穿格净通量估计：`vx ≈ (东向净通量)/(L·d̄)`。
+通量阻尼 `damp = exp(-drag·Δt)` 让水体最终归于静止。
+
+### 13.3 CFL 与子步
+
+显式积分需满足 `Δt < L / √(g·h_max)`。每帧把 `frameDt·timeScale` 切成 `substeps`
+个子步，并钳上限（0.08s）。近岸活动带 h≲24m → c≈15m/s、L≈1.6m → CFL≈0.1s，
+4 子步下 Δt≈0.003s 余量充足；深场格基本静止，不参与波动。
+
+### 13.4 干湿格
+
+水深 `d` 全程钳 `≥0`；干格 d=0 → 外流为 0（管道模型自动），水只会从有水的邻格流入。
+沙滩上的水膜就是 `d≈ε` 的湿格，冲滩回流即由此涌现，无需特判。
+
+### 13.5 边界耦合（单向，L0 → SWE）
+
+域外缘 deep ring（`terrain < seaLevel − 4`、距边 ≤3 texel）做 **Dirichlet 强制**：
+把 L0 位移纹理在该世界点的 `disp.y` 采进来，令 `d = max(0, (seaLevel + disp.y·coupling) − b)`，
+把开阔海涌浪"推入"近岸。采样 L0 时世界点经 `(wp − gridOffset)/gridSize + 0.5` 映射到
+跟随相机的位移纹理 UV；落在 [0,1] 外（相机远离近岸时）则退化为静止海平面。
+非 deep 的边（陆侧/汀线）走 clamp-to-edge → 零梯度反射壁。
+
+### 13.6 渲染整合
+
+海面 mesh 在 vertex shader 里按域内距判定 mask（域心 1、边缘 0 平滑过渡）：
+
+```glsl
+y      = mix(seaLevel + dispL0.y, sweSurfaceY, mask);   // 高度切到 SWE 解
+水平位移 = mix(L0 chop, 0, mask);                        // 近岸去掉尖峰横移
+法线    = mix(L0 法线, SWE 面法线, mask);                // 由 surfaceY 邻格有限差分
+```
+
+干湿透明：`alpha *= mix(1, smoothstep(0.02, 0.3, depth), mask)`，水膜趋零时海面淡出
+露出沙滩；`alpha < 0.02` 直接 discard 避免在沙滩上写深度。
+泡沫并入同一张泡沫纹理：foam pass 由 `uv·gridSize + gridOffset` 还原世界点、映射到
+SWE 域采样，按"快且浅"判破碎、按汀线水深带判 swash，加进 `generation`。
+
+### 13.7 孤立水洼
+
+潮池被高于海面的滩面与凸缘环绕，与外海不连通，初始化时给它一个倾斜水面
+（lopsided fill）以其自身固有频率起振——因此可视地与外海涌浪**不同步**晃动，
+低 drag 下持续可见；外海则由边界耦合持续推动，二者节奏明显不同。
+
+---
+
 ## 附录：数学常数
 
 | 常数 | 值 | 说明 |

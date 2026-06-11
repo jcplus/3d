@@ -9,12 +9,18 @@
  * (macro swell / wind sea / chop) and uploaded as uniform arrays, so the
  * physics pass and the far-field skirt evaluate the exact same field.
  *
- * Version: 0.3.0
+ * The near-shore shallow-water layer (L2) lives in swe.js; this class owns it,
+ * feeds it the L0 displacement for boundary coupling, and blends its solution
+ * into the surface mesh and the foam pass.
+ *
+ * Version: 0.4.0
  */
 
 import * as THREE from 'three';
 import { GPUComputationRenderer } from 'three/addons/misc/GPUComputationRenderer.js';
 import { config, getters } from './config.js';
+import { ShallowWater } from './swe.js';
+import { SWE_ORIGIN, SWE_SIZE } from './terrain.js';
 
 const WAVE_COUNT = 12;
 const SWELL_COUNT = 3;
@@ -40,6 +46,9 @@ export class Ocean {
         this.buildSpectrum();
 
         this.initGPGPU();
+        // Near-shore shallow-water layer (fixed patch at the world origin)
+        this.swe = new ShallowWater(renderer);
+        this.sweTexel = 1.0 / this.swe.res;
         this.createMesh();
         this.createSkirt();
         this.createSpraySystem();
@@ -188,6 +197,15 @@ export class Ocean {
         foamUniforms['uThreshold'] = { value: config.foamThreshold };
         foamUniforms['uGrowth'] = { value: config.foamGrowth };
         foamUniforms['uUVOffset'] = { value: new THREE.Vector2(0, 0) };
+        // Near-shore foam: the foam pass samples the SWE state in world space
+        // and adds breaker / shore-wash generation into the shared foam texture
+        foamUniforms['uGridOffset'] = { value: new THREE.Vector2(0, 0) };
+        foamUniforms['uGridSize'] = { value: this.gridSize };
+        foamUniforms['uSweTexture'] = { value: null };
+        foamUniforms['uSweOrigin'] = { value: SWE_ORIGIN };
+        foamUniforms['uSweSize'] = { value: SWE_SIZE };
+        foamUniforms['uSweEnabled'] = { value: config.sweEnabled ? 1.0 : 0.0 };
+        foamUniforms['uSweFoam'] = { value: config.sweFoam };
 
         this.physUniforms = physUniforms;
         this.foamUniforms = foamUniforms;
@@ -281,6 +299,13 @@ export class Ocean {
             uniform float uGrowth;
             uniform float uTime;
             uniform vec2 uUVOffset;
+            uniform vec2 uGridOffset;
+            uniform float uGridSize;
+            uniform sampler2D uSweTexture;
+            uniform vec2 uSweOrigin;
+            uniform float uSweSize;
+            uniform float uSweEnabled;
+            uniform float uSweFoam;
 
             void main() {
                 vec2 uv = gl_FragCoord.xy / resolution.xy;
@@ -298,9 +323,24 @@ export class Ocean {
                     prevFoam = texture2D(textureFoam, prevUv).r;
                 }
 
-                // 3. Generate and blend
+                // 3. Generate from the open-ocean crest compression
                 float generation = smoothstep(uThreshold, uThreshold - 0.2, jacobian);
                 generation = clamp(generation, 0.0, 1.0) * 0.075 * uGrowth;
+
+                // 4. Near-shore foam: breakers (fast + shallow) and the wet/dry
+                // swash line, sampled from the SWE state at this world position
+                if (uSweEnabled > 0.5) {
+                    vec2 worldPos = (uv - 0.5) * uGridSize + uGridOffset;
+                    vec2 sUv = (worldPos - uSweOrigin) / uSweSize + 0.5;
+                    if (sUv.x > 0.0 && sUv.x < 1.0 && sUv.y > 0.0 && sUv.y < 1.0) {
+                        vec4 sw = texture2D(uSweTexture, sUv);
+                        float depth = sw.x;
+                        float speed = length(sw.yz);
+                        float breaking = smoothstep(0.6, 1.8, speed) * smoothstep(2.5, 0.2, depth);
+                        float swash = smoothstep(0.02, 0.18, depth) * smoothstep(0.6, 0.18, depth);
+                        generation += clamp(breaking + swash * 0.5, 0.0, 1.0) * 0.12 * uSweFoam;
+                    }
+                }
 
                 float foam = prevFoam * uDecay + generation;
                 foam = clamp(foam, 0.0, 1.0);
@@ -354,6 +394,12 @@ export class Ocean {
                 uFogDensity: { value: config.fogDensity },
                 uChopAmount: { value: config.chopAmount },
                 uAmpNorm: { value: this.ampNorm },
+                uSweTexture: { value: null },
+                uSweOrigin: { value: SWE_ORIGIN },
+                uSweSize: { value: SWE_SIZE },
+                uSweTexel: { value: this.sweTexel },
+                uSweEnabled: { value: config.sweEnabled ? 1.0 : 0.0 },
+                uSeaLevel: { value: config.seaLevel },
             },
             transparent: true,
         });
@@ -635,6 +681,12 @@ export class Ocean {
                 (offsetX - this.gridOffset.x) / this.gridSize,
                 (offsetZ - this.gridOffset.y) / this.gridSize
             );
+            // Foam pass samples the SWE state from last frame (the foam pass
+            // runs inside this compute(), before the SWE step below)
+            this.foamUniforms.uGridOffset.value.set(offsetX, offsetZ);
+            this.foamUniforms.uSweTexture.value = this.swe.getStateTexture();
+            this.foamUniforms.uSweEnabled.value = config.sweEnabled ? 1.0 : 0.0;
+            this.foamUniforms.uSweFoam.value = config.sweFoam;
         }
 
         this.gridOffset.set(offsetX, offsetZ);
@@ -646,6 +698,15 @@ export class Ocean {
 
         const physicsTexture = this.gpuCompute.getCurrentRenderTarget(this.physicsVariable).texture;
         const foamTexture = this.gpuCompute.getCurrentRenderTarget(this.foamVariable).texture;
+
+        // Advance the near-shore shallow-water layer, coupled to this frame's
+        // L0 displacement at its deep boundary
+        if (config.sweEnabled) {
+            const frameDt = Math.min(config.deltaTime, 0.05) * config.timeScale;
+            const substeps = Math.max(1, Math.floor(config.sweSubsteps));
+            const dtSub = Math.min(frameDt / substeps, 0.08);
+            this.swe.update(physicsTexture, this.gridOffset, this.gridSize, dtSub, substeps);
+        }
 
         if (this.material) {
             const u = this.material.uniforms;
@@ -670,6 +731,10 @@ export class Ocean {
             u.uFogDensity.value = config.fogDensity;
             u.uChopAmount.value = config.chopAmount;
             u.uAmpNorm.value = this.ampNorm;
+            // Freshest SWE state for the surface blend
+            u.uSweTexture.value = this.swe.getStateTexture();
+            u.uSweEnabled.value = config.sweEnabled ? 1.0 : 0.0;
+            u.uSeaLevel.value = config.seaLevel;
         }
 
         if (this.skirtMaterial) {
@@ -700,5 +765,6 @@ export class Ocean {
         this.scene.remove(this.mesh);
         this.scene.remove(this.skirt);
         this.scene.remove(this.spraySystem);
+        if (this.swe) this.swe.dispose();
     }
 }

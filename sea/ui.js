@@ -7,7 +7,7 @@
  * persisted to localStorage; "Refresh" reloads to apply grid-level changes,
  * "Reset" clears saved values and restores defaults.
  *
- * Version: 0.3.0
+ * Version: 0.4.0
  */
 
 import { config, saveConfigToStorage, clearSavedConfig } from './config.js';
@@ -74,6 +74,17 @@ export class UI {
                     ],
                 },
                 {
+                    title: 'Near Shore (SWE)',
+                    target: config,
+                    params: [
+                        { key: 'sweEnabled', label: 'Enabled', type: 'boolean', description: 'Shallow-water near-shore layer: beach run-up and the isolated tide pool' },
+                        { key: 'sweSubsteps', label: 'Substeps', type: 'number', min: 1, max: 8, step: 1, description: 'Solver substeps per frame; more = more stable but costlier' },
+                        { key: 'sweDrag', label: 'Drag', type: 'number', min: 0, max: 3, step: 0.05, description: 'Velocity damping; higher = water settles faster' },
+                        { key: 'sweCoupling', label: 'Swell Coupling', type: 'number', min: 0, max: 2, step: 0.05, description: 'Open-ocean swell pushed in at the deep boundary' },
+                        { key: 'sweFoam', label: 'Shore Foam', type: 'number', min: 0, max: 3, step: 0.05, description: 'Breaker and swash foam strength along the shore' },
+                    ],
+                },
+                {
                     title: 'Atmosphere',
                     target: config,
                     params: [
@@ -98,6 +109,7 @@ export class UI {
                     params: [
                         { key: 'gridSize', label: 'Grid Size', type: 'number', min: 250, max: 4000, step: 50, description: 'World size of the ocean patch in meters; applied after Refresh' },
                         { key: 'gridResolution', label: 'Resolution', type: 'number', min: 64, max: 1024, step: 64, description: 'GPGPU texture and mesh resolution; applied after Refresh' },
+                        { key: 'sweResolution', label: 'SWE Resolution', type: 'number', min: 64, max: 512, step: 64, description: 'Near-shore shallow-water grid resolution; applied after Refresh' },
                     ],
                 },
                 {

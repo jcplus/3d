@@ -4,7 +4,7 @@
  * Uses Proxy-based reactive state management.
  * All modules read from this single source of truth.
  *
- * Version: 0.3.0
+ * Version: 0.4.0
  */
 
 import * as THREE from 'three';
@@ -46,6 +46,15 @@ const defaultConfig = {
     skyColorZenith: 0x5d86ad,
     skyColorHorizon: 0xbccdd6,
     fogDensity: 0.0011,
+
+    // Near-shore shallow water (L2): a fixed patch at the world origin with a
+    // beach and an isolated tide pool (see terrain.js / swe.js)
+    sweEnabled: true,
+    sweSubsteps: 4,        // Pipe-model substeps per frame (CFL stability)
+    sweDrag: 0.6,          // Velocity damping; higher = water settles faster
+    sweCoupling: 1.0,      // Open-ocean swell injected at the deep boundary
+    sweFoam: 1.2,          // Shore wash / breaker foam strength
+    sweResolution: 256,    // SWE grid resolution (refresh to apply)
 
     // Visual settings
     waterColorDeep: 0x0d4d5e,
