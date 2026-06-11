@@ -27,7 +27,7 @@
  * the accumulated foam along it. Convergent chop then gathers the foam into
  * the streaky downwind webbing of a worked sea instead of static blooms.
  *
- * Version: 0.7.0
+ * Version: 0.7.4
  */
 
 import * as THREE from 'three';
@@ -115,6 +115,8 @@ export class Ocean {
             this.getFoamAccumulateShader(),
             foamTexture
         );
+        this.foamVariable.minFilter = THREE.LinearFilter;
+        this.foamVariable.magFilter = THREE.LinearFilter;
 
         this.gpuCompute.setVariableDependencies(this.foamVariable, [this.foamVariable]);
 
@@ -363,7 +365,7 @@ export class Ocean {
             // Sample the periodic FFT tile (RGB = Dx, height, Dz) by world
             // position; the same tile feeds the main grid, so the seam matches.
             vec3 sampleDisp(vec2 worldXZ) {
-                return texture2D(uTile, worldXZ / uPatch).xyz;
+                return texture2D(uTile, fract(worldXZ / uPatch)).xyz;
             }
 
             void main() {
@@ -459,7 +461,7 @@ export class Ocean {
                 // alpha, so folding crests keep flecking the sea out to the fog
                 // line. A wind-stretched vein field breaks them into streaks and
                 // a very low-frequency mask hides the tile repetition.
-                float jac = texture2D(uTile, vWorldPosition.xz / uPatch).a;
+                float jac = texture2D(uTile, fract(vWorldPosition.xz / uPatch)).a;
                 vec2 wDir = normalize(uWindDir);
                 vec2 wuv = vec2(dot(vWorldPosition.xz, wDir) * 0.35,
                                 dot(vWorldPosition.xz, vec2(-wDir.y, wDir.x)));
@@ -482,6 +484,24 @@ export class Ocean {
     }
 
     update(deltaTime, camera) {
+        // Unbind active textures to prevent WebGL feedback loops
+        if (this.renderer && this.renderer.state) {
+            this.renderer.state.unbindTexture(this.fft.tileTexture);
+            this.renderer.state.unbindTexture(this.physicsTargets[this.physicsIndex].texture);
+            this.renderer.state.unbindTexture(this.physicsTargets[this.physicsIndex ^ 1].texture);
+            if (this.swe) {
+                this.renderer.state.unbindTexture(this.swe.getStateTexture());
+            }
+            const currentFoam = this.gpuCompute.getCurrentRenderTarget(this.foamVariable)?.texture;
+            if (currentFoam) {
+                this.renderer.state.unbindTexture(currentFoam);
+            }
+            const alternateFoam = this.gpuCompute.getAlternateRenderTarget(this.foamVariable)?.texture;
+            if (alternateFoam) {
+                this.renderer.state.unbindTexture(alternateFoam);
+            }
+        }
+
         this.timeUniform.value = config.time;
 
         // Reseed the FFT spectrum only when the wind / wave inputs change

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="version" content="0.4.0">
+    <meta name="version" content="0.4.2">
     <title>Real-Time Ocean Simulation</title>
     <style>
         * {
@@ -43,6 +43,7 @@
     </style>
 </head>
 <body>
+
     <div id="canvas-container"></div>
     <div id="loading">Loading Ocean Simulation...</div>
     <div id="info">
@@ -154,6 +155,7 @@
     </script>
 
     <script type="x-shader/x-fragment" id="ocean-fragment">
+        uniform sampler2D uDisplacementMap;
         uniform vec3 uWaterColorDeep;
         uniform vec3 uWaterColorShallow;
         uniform vec3 uSunPosition;
@@ -276,10 +278,12 @@
 
             // === Foam hierarchy: whitecap / trailing / lacing ===
             float foamAcc = texture2D(uFoamTexture, vUv).r;
+            float jacobian = texture2D(uDisplacementMap, vUv).a;
+            float fragFoam = 1.0 - jacobian;
             // Crest whitecap: instantaneous crest compression plus the top of
             // the accumulated value - crisp and nearly pure white
             float whitecap = smoothstep(uFoamThreshold, uFoamThreshold + 0.12, foamAcc)
-                           + smoothstep(0.5, 0.8, vFoam);
+                           + smoothstep(0.5, 0.8, fragFoam);
             whitecap = clamp(whitecap, 0.0, 1.0);
             // Trailing foam: decaying wake behind the crest, semi-transparent
             float trailing = smoothstep(uFoamThreshold * 0.45, uFoamThreshold, foamAcc);

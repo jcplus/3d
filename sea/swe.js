@@ -14,7 +14,7 @@
  * have zero depth and emit no flux), and is unconditionally non-negative
  * because outflow is scaled to the water actually available in a cell.
  *
- * Version: 0.1.0
+ * Version: 0.1.3
  */
 
 import * as THREE from 'three';
@@ -41,6 +41,8 @@ export class ShallowWater {
 
         this.fluxVar = this.gpu.addVariable('textureFlux', this.getFluxShader(), flux0);
         this.waterVar = this.gpu.addVariable('textureWater', this.getWaterShader(), water0);
+        this.waterVar.minFilter = THREE.LinearFilter;
+        this.waterVar.magFilter = THREE.LinearFilter;
 
         this.gpu.setVariableDependencies(this.fluxVar, [this.fluxVar, this.waterVar]);
         this.gpu.setVariableDependencies(this.waterVar, [this.fluxVar, this.waterVar]);

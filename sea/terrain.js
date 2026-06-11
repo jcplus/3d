@@ -12,7 +12,7 @@
  *
  * Sea level is authored at world y = 0 (config.seaLevel sits the ocean there).
  *
- * Version: 0.1.0
+ * Version: 0.1.1
  */
 
 import * as THREE from 'three';
@@ -53,7 +53,7 @@ export const TERRAIN_GLSL = `
         float deep = -130.0 + tFbm(p * 0.012) * 16.0;
         // Cross-shore beach profile: deep on -x, rising to dry land on +x
         float beach = mix(-24.0, 17.0, smoothstep(-170.0, 150.0, p.x));
-        beach += 1.6 * sin(p.z * 0.03) + 1.2 * sin(p.x * 0.05 + 1.7);
+        beach += 1.6 * sin(p.y * 0.03) + 1.2 * sin(p.x * 0.05 + 1.7);
         beach += tFbm(p * 0.03) * 1.2;
         // Isolated tide pool on the upper beach: a bowl ringed by a raised rim
         vec2 poolC = vec2(85.0, -70.0);
