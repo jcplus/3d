@@ -19,7 +19,6 @@ const defaultConfig = {
     windDirection: 15.0, // Degrees (0-360)
     windSpeed: 22.0,     // Drives the Phillips spectrum shape (peak wavelength)
     choppiness: 1.7,     // Horizontal displacement scale; pinches crests into sharp cusps (>~2.0 over-folds)
-    crestLean: 0.6,      // Forward-lean: shifts crests downwind by height*this, giving a steep front face
     timeScale: 0.75,
 
     // FFT spectrum

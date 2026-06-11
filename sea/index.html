@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="version" content="0.4.6">
+    <meta name="version" content="0.4.7">
     <title>Real-Time Ocean Simulation</title>
     <style>
         * {
@@ -74,8 +74,6 @@
         uniform float uTime;
         uniform float uGridSize;
         uniform float uGridResolution;
-        uniform vec2 uWindDir;
-        uniform float uCrestLean;
 
         // Near-shore shallow water (L2) blended over the open-ocean field
         uniform sampler2D uSweTexture;   // (depth, vx, vz, surfaceY)
@@ -101,24 +99,13 @@
             vec4 data = texture2D(uDisplacementMap, uv);
             vec3 displacement = data.rgb;
 
-            // Forward-leaning crests: a symmetric choppy cusp reads as inverted
-            // (peaks lean nowhere). Shifting the surface downwind by an amount
-            // proportional to crest height pitches each peak forward — long
-            // gentle back slope, steep front face — the real breaking shape.
-            // Applied to the neighbour samples too so the normal follows it.
-            vec3 leanDir = vec3(normalize(uWindDir).x, 0.0, normalize(uWindDir).y) * uCrestLean;
+            // Displacement from sea.js is already the final world offset
+            vec3 newPosition = position + displacement;
 
             // === Open-ocean normal from the displacement field ===
             float texelSize = 1.0 / uGridResolution;
             vec3 pRight = texture2D(uDisplacementMap, uv + vec2(texelSize, 0.0)).rgb;
             vec3 pDown  = texture2D(uDisplacementMap, uv + vec2(0.0, texelSize)).rgb;
-            displacement += leanDir * max(displacement.y, 0.0);
-            pRight       += leanDir * max(pRight.y, 0.0);
-            pDown        += leanDir * max(pDown.y, 0.0);
-
-            // Displacement from sea.js is already the final world offset
-            vec3 newPosition = position + displacement;
-
             float gridStep = uGridSize / uGridResolution;
             vec3 vRight = vec3(gridStep, 0.0, 0.0) + (pRight - displacement);
             vec3 vDown  = vec3(0.0, 0.0, gridStep) + (pDown - displacement);
