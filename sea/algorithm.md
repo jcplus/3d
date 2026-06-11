@@ -439,6 +439,91 @@ class WaveGenerator {
 
 ---
 
+## 11. 无限海面与泡沫重投影
+
+让固定大小的网格跟随相机移动，营造无边界海面。核心是三个配合的机制。
+
+### 11.1 整 patch 吸附（防 swimming）
+
+网格每帧吸附到相机所在的整 patch 位置，而不是连续跟随：
+
+```
+patchSize = gridSize / gridResolution     // 一个网格单元的世界尺寸
+offset.x  = floor(camera.x / patchSize) * patchSize
+offset.z  = floor(camera.z / patchSize) * patchSize
+mesh.position.xz = offset
+```
+
+**关键**：按整 patch 步进保证每个顶点的世界坐标始终落在固定的世界格点上，
+顶点采样到的波形值帧间连续，不会产生"游泳感"（swimming）。
+连续跟随则会让顶点在波形函数上滑动，整个海面看起来粘在相机上。
+
+### 11.2 物理用绝对世界坐标
+
+波形是世界坐标的函数。物理 compute shader 接收网格偏移，把纹理 UV 还原为世界坐标：
+
+```glsl
+uniform vec2 uGridOffset;   // = mesh.position.xz
+
+vec2 worldPos = (uv - 0.5) * uGridSize + uGridOffset;
+// 之后所有波形计算照旧，平移天然无缝
+```
+
+Domain Warping 等基于位置的扰动同样自动正确，因为它们也吃 worldPos。
+
+### 11.3 泡沫 UV 重投影
+
+泡沫是帧间累积量，存在网格局部 UV 空间里。网格移动后，同一 UV 对应的世界位置变了，
+直接采样上帧泡沫会让泡沫整体跟着网格漂移。解法是采样时按偏移差重投影：
+
+```
+uUVOffset = (offset_now - offset_prev) / gridSize   // 本帧相对上帧的位移，UV 单位
+```
+
+```glsl
+uniform vec2 uUVOffset;
+
+vec2 prevUv = uv + uUVOffset;
+float prevFoam = 0.0;
+if (prevUv.x >= 0.0 && prevUv.x <= 1.0 &&
+    prevUv.y >= 0.0 && prevUv.y <= 1.0) {
+    prevFoam = texture2D(textureFoam, prevUv).r;
+}
+// 越界 = 新进入视野的区域，没有历史泡沫，从 0 开始累积
+```
+
+推导：世界点 W 在本帧的 UV 是 `(W - offset_now)/gridSize + 0.5`，
+在上帧是 `(W - offset_prev)/gridSize + 0.5`，二者之差正是 `uUVOffset`。
+
+### 11.4 UV 轴向约定陷阱
+
+three.js 的 `PlaneGeometry` 经 `rotateX(-π/2)` 放平后，顶点局部坐标
+`z = (0.5 - v) * size` —— V 轴与世界 Z 轴**反向**。而 compute shader 里习惯写
+`worldPos = (uv - 0.5) * gridSize`（V 与 Z 同向）。网格静止时这只是波场镜像，
+看不出问题；网格一移动，两个约定的偏移方向就会打架（Z 向波浪滚动方向错误）。
+
+统一约定的最简做法是在建网格时翻转一次 V：
+
+```javascript
+const uvAttr = geometry.attributes.uv;
+for (let i = 0; i < uvAttr.count; i++) {
+    uvAttr.setY(i, 1.0 - uvAttr.getY(i));
+}
+```
+
+此后纹理 V 与世界 Z 同向，物理、泡沫重投影、粒子采样共用同一套公式。
+
+### 11.5 配套细节
+
+- **粒子系统**：粒子位置存网格局部坐标，整个 `Points` 对象与网格一起吸附平移，
+  采样 UV 公式不变。
+- **片元世界坐标效果**：依赖世界坐标的着色细节（如泡沫气泡噪声）必须用
+  `vWorldPosition` 而不是 UV，否则图案会跟着网格跳动。
+- **海底跟随**：地形高度若是世界坐标的函数（如 `fbm(worldPos)`），海底网格按
+  自己的 patch 尺寸吸附即可，地形自动稳定。
+
+---
+
 ## 附录：数学常数
 
 | 常数 | 值 | 说明 |

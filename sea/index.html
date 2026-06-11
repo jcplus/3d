@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="version" content="0.2.0">
     <title>Real-Time Ocean Simulation</title>
     <style>
         * {
@@ -46,7 +47,7 @@
     <div id="loading">Loading Ocean Simulation...</div>
     <div id="info">
         WASD: Move | Mouse: Look | Scroll: Zoom<br>
-        WebGL 2.0 iFFT Ocean Simulation
+        WebGL 2.0 Gerstner Ocean Simulation
     </div>
 
     <!-- Three.js from CDN -->
@@ -70,7 +71,9 @@
     <script type="x-shader/x-vertex" id="ocean-vertex">
         uniform sampler2D uDisplacementMap;
         uniform float uTime;
-        
+        uniform float uGridSize;
+        uniform float uGridResolution;
+
         varying vec3 vWorldPosition;
         varying vec3 vNormal;
         varying vec2 vUv;
@@ -95,12 +98,12 @@
             
             // === Real-time normal calculation ===
             // Sample neighbouring pixels to calculate normals; sharper than precomputed normal maps
-            float texelSize = 1.0 / 256.0; // assume resolution 256
+            float texelSize = 1.0 / uGridResolution;
             vec3 pRight = texture2D(uDisplacementMap, uv + vec2(texelSize, 0.0)).rgb;
             vec3 pDown  = texture2D(uDisplacementMap, uv + vec2(0.0, texelSize)).rgb;
-            
-            // Base grid spacing (gridSize / resolution)
-            float gridStep = 1000.0 / 256.0; 
+
+            // Base grid spacing
+            float gridStep = uGridSize / uGridResolution;
             
             // Calculate tangent vectors
             // Original position difference (gridStep) + displacement difference
@@ -178,8 +181,9 @@
             float foam = texture2D(uFoamTexture, vUv).r;
             foam = smoothstep(uFoamThreshold, 1.0, foam);
             
-            // Add procedural bubble noise to foam
-            float bubbleNoise = snoise(vUv * 50.0 + uTime * 0.5) * 0.5 + 0.5;
+            // Add procedural bubble noise to foam (world-space so the
+            // pattern stays put when the grid follows the camera)
+            float bubbleNoise = snoise(vWorldPosition.xz * 0.05 + uTime * 0.5) * 0.5 + 0.5;
             foam *= mix(0.7, 1.0, bubbleNoise);
             
             // Subsurface scattering at wave tips

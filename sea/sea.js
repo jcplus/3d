@@ -1,5 +1,11 @@
 /**
- * sea.js - Static Large Ocean (No Infinite Scrolling)
+ * sea.js - Infinite Ocean (camera-following grid)
+ *
+ * The grid snaps to the camera in whole-patch steps so vertex world
+ * positions stay stable. Wave physics is evaluated in absolute world
+ * coordinates; foam history is reprojected when the grid moves.
+ *
+ * Version: 0.2.0
  */
 
 import * as THREE from 'three';
@@ -11,7 +17,9 @@ export class Ocean {
         this.renderer = renderer;
         this.scene = scene;
         this.gridSize = config.gridSize;
-        
+        // World-space grid origin, snapped to whole patches each frame
+        this.gridOffset = new THREE.Vector2(0, 0);
+
         this.initGPGPU();
         this.createMesh();
         this.createSpraySystem();
@@ -57,15 +65,17 @@ export class Ocean {
         const physUniforms = this.physicsVariable.material.uniforms;
         physUniforms['uTime'] = this.timeUniform;
         physUniforms['uGridSize'] = { value: this.gridSize };
+        physUniforms['uGridOffset'] = { value: new THREE.Vector2(0, 0) };
         physUniforms['uChoppiness'] = { value: config.choppiness };
         physUniforms['uWindDirection'] = { value: getters.windVector };
         physUniforms['uWindSpeed'] = { value: config.windSpeed };
-        
+
         // === Foam Uniforms ===
         const foamUniforms = this.foamVariable.material.uniforms;
         foamUniforms['uTime'] = this.timeUniform;
         foamUniforms['uDecay'] = { value: config.foamDecay };
         foamUniforms['uThreshold'] = { value: config.foamThreshold };
+        foamUniforms['uUVOffset'] = { value: new THREE.Vector2(0, 0) };
         
         this.physUniforms = physUniforms;
         this.foamUniforms = foamUniforms;
@@ -74,7 +84,8 @@ export class Ocean {
     getWaveComputeShader() {
         return `
             uniform float uTime;
-            uniform float uGridSize; 
+            uniform float uGridSize;
+            uniform vec2 uGridOffset;
             uniform float uChoppiness;
             uniform vec2 uWindDirection;
             uniform float uWindSpeed;
@@ -144,8 +155,10 @@ export class Ocean {
 
             void main() {
                 vec2 uv = gl_FragCoord.xy / resolution.xy;
-                vec2 worldPos = (uv - 0.5) * uGridSize; 
-                
+                // Absolute world coordinates: the wave field is a function of
+                // world position, so the grid can translate without seams
+                vec2 worldPos = (uv - 0.5) * uGridSize + uGridOffset;
+
                 // Domain Warping
                 vec2 warp = vec2(
                     sin(worldPos.y * 0.005 + uTime * 0.1),
@@ -208,17 +221,23 @@ export class Ocean {
             uniform float uDecay;
             uniform float uThreshold;
             uniform float uTime;
-            
+            uniform vec2 uUVOffset;
+
             void main() {
                 vec2 uv = gl_FragCoord.xy / resolution.xy;
-                
+
                 // 1. Read current physics state
                 vec4 physics = texture2D(texturePhysics, uv);
                 float jacobian = physics.a;
-                
-                // 2. Read previous frame foam
-                // Since the grid is static, previous frame foam is at the same UV; no offset compensation needed
-                float prevFoam = texture2D(textureFoam, uv).r;
+
+                // 2. Read previous frame foam, reprojected by the grid movement
+                // so accumulated foam stays pinned to world positions.
+                // Areas newly scrolled into view have no history and start at zero.
+                vec2 prevUv = uv + uUVOffset;
+                float prevFoam = 0.0;
+                if (prevUv.x >= 0.0 && prevUv.x <= 1.0 && prevUv.y >= 0.0 && prevUv.y <= 1.0) {
+                    prevFoam = texture2D(textureFoam, prevUv).r;
+                }
                 
                 // 3. Generate and blend
                 float generation = smoothstep(uThreshold, uThreshold - 0.2, jacobian);
@@ -233,7 +252,6 @@ export class Ocean {
     }
     
     createMesh() {
-        // Create static large grid
         const geometry = new THREE.PlaneGeometry(
             this.gridSize,
             this.gridSize,
@@ -241,7 +259,14 @@ export class Ocean {
             config.gridResolution
         );
         geometry.rotateX(-Math.PI / 2);
-        
+
+        // Flip V so texture space matches the physics shader convention
+        // (local z = (v - 0.5) * gridSize); rotateX alone leaves V mirrored
+        const uvAttr = geometry.attributes.uv;
+        for (let i = 0; i < uvAttr.count; i++) {
+            uvAttr.setY(i, 1.0 - uvAttr.getY(i));
+        }
+
         const vertexShader = document.getElementById('ocean-vertex').textContent;
         const fragmentShader = document.getElementById('ocean-fragment').textContent;
         
@@ -257,12 +282,14 @@ export class Ocean {
                 uSunPosition: { value: getters.sunPositionVector },
                 uFoamThreshold: { value: config.foamThreshold },
                 uCameraPosition: { value: new THREE.Vector3() },
+                uGridSize: { value: this.gridSize },
+                uGridResolution: { value: config.gridResolution },
             },
             transparent: true,
         });
-        
+
         this.mesh = new THREE.Mesh(geometry, this.material);
-        this.mesh.position.set(0, config.seaLevel, 0); // fixed at origin
+        this.mesh.position.set(0, config.seaLevel, 0); // snapped to camera each frame
         // Ensure the mesh is not frustum-culled due to its size
         this.mesh.frustumCulled = false; 
         
@@ -303,7 +330,8 @@ export class Ocean {
                 
                 void main() {
                     vec3 pos = position;
-                    // UV calculation for static grid
+                    // Grid-local coordinates map to texture UV; the Points
+                    // object itself follows the grid offset
                     vec2 uv = (pos.xz / uGridSize) + 0.5;
                     
                     vec4 disp = texture2D(uDisplacementMap, uv);
@@ -339,21 +367,37 @@ export class Ocean {
         });
         
         this.spraySystem = new THREE.Points(geometry, material);
-        this.spraySystem.position.set(0, config.seaLevel, 0); // fixed position
+        this.spraySystem.position.set(0, config.seaLevel, 0); // snapped to camera each frame
         this.spraySystem.frustumCulled = false;
         this.scene.add(this.spraySystem);
     }
     
     update(deltaTime, camera) {
         this.timeUniform.value = config.time;
-        
+
+        // Snap the grid to the camera in whole-patch steps so vertex world
+        // positions stay stable (no swimming)
+        const patch = getters.patchSize;
+        const offsetX = Math.floor(camera.position.x / patch) * patch;
+        const offsetZ = Math.floor(camera.position.z / patch) * patch;
+
         if(this.physUniforms) {
             this.physUniforms.uChoppiness.value = config.choppiness;
             this.physUniforms.uWindSpeed.value = config.windSpeed;
             this.physUniforms.uWindDirection.value.copy(getters.windVector);
+            this.physUniforms.uGridOffset.value.set(offsetX, offsetZ);
             this.foamUniforms.uDecay.value = config.foamDecay;
             this.foamUniforms.uThreshold.value = config.foamThreshold;
+            // Reprojection delta: where this frame's texel lived in last frame's UV space
+            this.foamUniforms.uUVOffset.value.set(
+                (offsetX - this.gridOffset.x) / this.gridSize,
+                (offsetZ - this.gridOffset.y) / this.gridSize
+            );
         }
+
+        this.gridOffset.set(offsetX, offsetZ);
+        this.mesh.position.set(offsetX, config.seaLevel, offsetZ);
+        this.spraySystem.position.set(offsetX, config.seaLevel, offsetZ);
 
         this.gpuCompute.compute();
         
