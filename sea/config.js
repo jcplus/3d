@@ -4,7 +4,7 @@
  * Uses Proxy-based reactive state management.
  * All modules read from this single source of truth.
  *
- * Version: 0.4.0
+ * Version: 0.5.0
  */
 
 import * as THREE from 'three';
@@ -55,6 +55,19 @@ const defaultConfig = {
     sweCoupling: 1.0,      // Open-ocean swell injected at the deep boundary
     sweFoam: 1.2,          // Shore wash / breaker foam strength
     sweResolution: 256,    // SWE grid resolution (refresh to apply)
+
+    // Wave-strike spray (L3): GPGPU particle pool thrown off the reefs when
+    // the open-ocean swell breaks against them (see spray.js)
+    sprayEnabled: true,
+    sprayBirthRate: 8.0,        // Respawn attempts per dead particle per second
+    spraySpawnThreshold: 1.2,   // Crest height over sea level needed to erupt (m)
+    spraySpeed: 9.0,            // Burst speed at birth (horizontal; vertical x1.6)
+    sprayGravity: 22.0,         // Downward acceleration on airborne droplets
+    sprayDrag: 0.25,           // Air drag; higher = droplets slow faster
+    sprayLife: 1.6,            // Maximum droplet lifetime (seconds)
+    spraySize: 7.0,            // Billboard point size
+    sprayFoam: 1.0,            // Foam left where spray takes off and lands
+    sprayPoolRes: 128,         // Particle pool is sprayPoolRes^2 (refresh to apply)
 
     // Visual settings
     waterColorDeep: 0x0d4d5e,

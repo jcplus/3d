@@ -11,15 +11,18 @@
  *
  * The near-shore shallow-water layer (L2) lives in swe.js; this class owns it,
  * feeds it the L0 displacement for boundary coupling, and blends its solution
- * into the surface mesh and the foam pass.
+ * into the surface mesh and the foam pass. The wave-strike particle layer (L3)
+ * lives in spray.js; it samples this frame's L0 displacement to throw spray off
+ * the reefs and stamps its foam splats into the same foam target.
  *
- * Version: 0.4.0
+ * Version: 0.5.0
  */
 
 import * as THREE from 'three';
 import { GPUComputationRenderer } from 'three/addons/misc/GPUComputationRenderer.js';
 import { config, getters } from './config.js';
 import { ShallowWater } from './swe.js';
+import { SpraySystem } from './spray.js';
 import { SWE_ORIGIN, SWE_SIZE } from './terrain.js';
 
 const WAVE_COUNT = 12;
@@ -51,7 +54,8 @@ export class Ocean {
         this.sweTexel = 1.0 / this.swe.res;
         this.createMesh();
         this.createSkirt();
-        this.createSpraySystem();
+        // Wave-strike particle layer (L3): GPGPU spray off the reefs
+        this.spray = new SpraySystem(renderer, scene);
     }
 
     /**
@@ -580,82 +584,6 @@ export class Ocean {
         `;
     }
 
-    createSpraySystem() {
-        const particleCount = 10000;
-        const geometry = new THREE.BufferGeometry();
-        const positions = new Float32Array(particleCount * 3);
-        const randoms = new Float32Array(particleCount);
-
-        for (let i = 0; i < particleCount; i++) {
-            // Particles distributed across the entire grid
-            positions[i * 3] = (Math.random() - 0.5) * this.gridSize;
-            positions[i * 3 + 1] = 0;
-            positions[i * 3 + 2] = (Math.random() - 0.5) * this.gridSize;
-            randoms[i] = Math.random();
-        }
-
-        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-        geometry.setAttribute('aRandom', new THREE.BufferAttribute(randoms, 1));
-
-        const material = new THREE.ShaderMaterial({
-            uniforms: {
-                uDisplacementMap: { value: null },
-                uFoamTexture: { value: null },
-                uTime: { value: 0 },
-                uGridSize: { value: this.gridSize }
-            },
-            vertexShader: `
-                uniform sampler2D uDisplacementMap;
-                uniform sampler2D uFoamTexture;
-                uniform float uGridSize;
-                uniform float uTime;
-                attribute float aRandom;
-                varying float vAlpha;
-
-                void main() {
-                    vec3 pos = position;
-                    // Grid-local coordinates map to texture UV; the Points
-                    // object itself follows the grid offset
-                    vec2 uv = (pos.xz / uGridSize) + 0.5;
-
-                    vec4 disp = texture2D(uDisplacementMap, uv);
-                    pos.x += disp.x;
-                    pos.y += disp.y;
-                    pos.z += disp.z;
-
-                    float foam = texture2D(uFoamTexture, uv).r;
-                    float foamIntensity = smoothstep(0.6, 0.9, foam);
-
-                    float life = fract(uTime * 0.8 + aRandom);
-                    pos.y += sin(life * 3.14) * 8.0 * foamIntensity;
-
-                    vAlpha = foamIntensity * (1.0 - life);
-
-                    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
-                    gl_Position = projectionMatrix * mvPosition;
-                    gl_PointSize = 6.0 * (300.0 / -mvPosition.z);
-                }
-            `,
-            fragmentShader: `
-                varying float vAlpha;
-                void main() {
-                    if (vAlpha < 0.05) discard;
-                    vec2 coord = gl_PointCoord - 0.5;
-                    if(length(coord) > 0.5) discard;
-                    gl_FragColor = vec4(1.0, 1.0, 1.0, vAlpha * 0.5);
-                }
-            `,
-            transparent: true,
-            depthWrite: false,
-            blending: THREE.AdditiveBlending
-        });
-
-        this.spraySystem = new THREE.Points(geometry, material);
-        this.spraySystem.position.set(0, config.seaLevel, 0); // snapped to camera each frame
-        this.spraySystem.frustumCulled = false;
-        this.scene.add(this.spraySystem);
-    }
-
     update(deltaTime, camera) {
         this.timeUniform.value = config.time;
 
@@ -691,7 +619,6 @@ export class Ocean {
 
         this.gridOffset.set(offsetX, offsetZ);
         this.mesh.position.set(offsetX, config.seaLevel, offsetZ);
-        this.spraySystem.position.set(offsetX, config.seaLevel, offsetZ);
         this.skirt.position.set(offsetX, config.seaLevel - 0.4, offsetZ);
 
         this.gpuCompute.compute();
@@ -754,17 +681,19 @@ export class Ocean {
             s.uAmpNorm.value = this.ampNorm;
         }
 
-        if (this.spraySystem) {
-            this.spraySystem.material.uniforms.uDisplacementMap.value = physicsTexture;
-            this.spraySystem.material.uniforms.uFoamTexture.value = foamTexture;
-            this.spraySystem.material.uniforms.uTime.value = config.time;
+        // Advance the wave-strike spray pool and splat its foam into the shared
+        // foam target (additively, persisting through the foam accumulation)
+        if (this.spray) {
+            const sprayDt = Math.min(config.deltaTime, 0.05) * config.timeScale;
+            const foamTarget = this.gpuCompute.getCurrentRenderTarget(this.foamVariable);
+            this.spray.update(sprayDt, physicsTexture, this.gridOffset, this.gridSize, foamTarget);
         }
     }
 
     dispose() {
         this.scene.remove(this.mesh);
         this.scene.remove(this.skirt);
-        this.scene.remove(this.spraySystem);
+        if (this.spray) this.spray.dispose();
         if (this.swe) this.swe.dispose();
     }
 }

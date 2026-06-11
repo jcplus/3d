@@ -7,7 +7,7 @@
  * persisted to localStorage; "Refresh" reloads to apply grid-level changes,
  * "Reset" clears saved values and restores defaults.
  *
- * Version: 0.4.0
+ * Version: 0.5.0
  */
 
 import { config, saveConfigToStorage, clearSavedConfig } from './config.js';
@@ -85,6 +85,21 @@ export class UI {
                     ],
                 },
                 {
+                    title: 'Wave Spray (L3)',
+                    target: config,
+                    params: [
+                        { key: 'sprayEnabled', label: 'Enabled', type: 'boolean', description: 'Wave-strike particle spray thrown off the reefs' },
+                        { key: 'sprayBirthRate', label: 'Birth Rate', type: 'number', min: 0, max: 30, step: 0.5, description: 'Respawn attempts per dead particle per second' },
+                        { key: 'spraySpawnThreshold', label: 'Trigger Height', type: 'number', min: 0.2, max: 4, step: 0.1, description: 'Crest height over sea level needed to erupt spray' },
+                        { key: 'spraySpeed', label: 'Burst Speed', type: 'number', min: 1, max: 25, step: 0.5, description: 'Initial droplet speed off the reef face' },
+                        { key: 'sprayGravity', label: 'Gravity', type: 'number', min: 5, max: 40, step: 0.5, description: 'Downward acceleration on airborne droplets' },
+                        { key: 'sprayDrag', label: 'Air Drag', type: 'number', min: 0, max: 2, step: 0.05, description: 'Velocity damping in flight; higher = shorter arcs' },
+                        { key: 'sprayLife', label: 'Lifetime', type: 'number', min: 0.4, max: 4, step: 0.1, description: 'Maximum droplet lifetime in seconds' },
+                        { key: 'spraySize', label: 'Droplet Size', type: 'number', min: 2, max: 20, step: 0.5, description: 'Billboard point size' },
+                        { key: 'sprayFoam', label: 'Splat Foam', type: 'number', min: 0, max: 3, step: 0.05, description: 'Foam left where spray takes off and lands' },
+                    ],
+                },
+                {
                     title: 'Atmosphere',
                     target: config,
                     params: [
@@ -110,6 +125,7 @@ export class UI {
                         { key: 'gridSize', label: 'Grid Size', type: 'number', min: 250, max: 4000, step: 50, description: 'World size of the ocean patch in meters; applied after Refresh' },
                         { key: 'gridResolution', label: 'Resolution', type: 'number', min: 64, max: 1024, step: 64, description: 'GPGPU texture and mesh resolution; applied after Refresh' },
                         { key: 'sweResolution', label: 'SWE Resolution', type: 'number', min: 64, max: 512, step: 64, description: 'Near-shore shallow-water grid resolution; applied after Refresh' },
+                        { key: 'sprayPoolRes', label: 'Spray Pool', type: 'number', min: 32, max: 256, step: 32, description: 'Spray particle pool is this value squared; applied after Refresh' },
                     ],
                 },
                 {

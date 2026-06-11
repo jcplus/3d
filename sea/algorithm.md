@@ -699,6 +699,74 @@ SWE 域采样，按"快且浅"判破碎、按汀线水深带判 swash，加进 `
 
 ---
 
+## 14. 浪击粒子（飞溅，M3）
+
+L0 涌浪撞击近岸礁石时抛出水花，落水留下泡沫痕迹。用 GPGPU 粒子池实现，
+与高度场**单向耦合**（粒子采样 L0，不反作用于水面，除了装饰性泡沫 splat）。
+
+### 14.1 粒子池（双纹理乒乓）
+
+```
+texturePosition = vec4(x, y, z, life)     世界位置 + 剩余寿命
+textureVelocity = vec4(vx, vy, vz, seed)  速度 + 恒定身份种子
+```
+
+池大小 `res²`（默认 128² = 16384）。`life ≤ 0` 即死亡并停泊在屏外。
+`seed` 在初始化时随机写入、终生不变，作为每个粒子去相关的随机身份。
+
+### 14.2 障碍物（礁石）
+
+CPU 维护礁石列表，打包成定长 `vec4` uniform 数组（centre.xz, 水线半径）。
+GLSL ES 1.00 不能用动态下标索引数组，故用 **loop-select**（`for k { if(k==oi) ob = arr[k]; }`）
+取出选中礁石——与多波叠加里用循环计数器索引 `uWaveA[i]` 同一手法。
+场景里放对应的礁石 mesh（粗面锥体）作视觉对应物。
+
+### 14.3 重生判定（关键：两个 pass 必须一致）
+
+GPUComputationRenderer 同一 `compute()` 里 position/velocity 两个 pass 读的都是上帧纹理，
+因此只要重生决策是 `(seed, uTime)` 的确定函数、两个 pass 注入**同一段 GLSL**，二者必然一致：
+
+```glsl
+bool spawn(seed, out pos, out vel, out life) {
+    // 每帧伯努利试验；uBirthProb = clamp(birthRate · dt, 0, 1)
+    if (hash11(seed·13.137 + uTime·53) > uBirthProb) return false;
+    // 选礁石，方位偏向迎波面（-waveDir）± 展宽
+    ang = atan(-waveDir.y, -waveDir.x) + (hash-0.5)·2.6;
+    hitXZ = reef.xz + dir(ang) · reef.r;
+    // 采 L0 该点波面高度，低于阈值（没有浪在拍）就不生
+    strength = surfaceY(hitXZ) - seaLevel;
+    if (strength < uSpawnThreshold) return false;
+    // 出生：迎面外向 + 向上 + 抖动，能量随波高
+    vel = (outward·horizBurst + up·vertBurst) · energy + jitter;
+    pos = vec3(hitXZ.x, seaLevel + strength·0.6, hitXZ.y);
+    life = uLife · (0.6 + 0.4·hash);
+}
+```
+
+`surfaceY(worldXZ)` 把世界点经 `(wp − gridOffset)/gridSize + 0.5` 映射到跟随相机的 L0
+位移纹理 UV，取 `seaLevel + disp.y`；落在 [0,1] 外退化为静止海平面。
+
+### 14.4 运动与落水死亡
+
+活粒子纯弹道：`vel.y -= g·dt; vel *= exp(-drag·dt); pos += vel·dt; life -= dt`。
+当 `pos.y < surfaceY(pos.xz)`（落回水面）或寿命耗尽即死亡。无粒子间作用——便宜。
+
+### 14.5 落水 splat 写回泡沫
+
+活粒子靠近水面时，把一小撮泡沫 additive 渲染进共享泡沫纹理：
+另起一个 Points + 正交相机，顶点把世界点映射到泡沫纹理 UV（`gl_Position = uv·2−1`），
+权重 `clamp(1 − (y − seaLevel)/6, 0, 1)`（越贴水越强），在 `gpuCompute.compute()`**之后**
+渲染进 `getCurrentRenderTarget(foam)`。该缓冲既是本帧海面采样源，又是下帧泡沫累积的
+"上帧"输入，故 splat 随泡沫衰减自然淡出。渲染时 `autoClear=false` 并复位渲染目标。
+
+### 14.6 billboard 渲染
+
+Points 顶点按 `aRef`（每粒子的纹理 texel 坐标）采 position 纹理取世界位，
+死粒子停泊到裁剪域外。`gl_PointSize` 按距离与寿命缩放，alpha 出生淡入、死亡淡出，
+AdditiveBlending + 软圆点。
+
+---
+
 ## 附录：数学常数
 
 | 常数 | 值 | 说明 |
