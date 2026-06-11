@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="version" content="0.4.9">
+    <meta name="version" content="0.5.0">
     <title>Real-Time Ocean Simulation</title>
     <style>
         * {
@@ -404,7 +404,9 @@
         uniform vec3 uCameraPosition;
         uniform float uSeaLevel;
         uniform float uTime;
-        
+        uniform vec3 uSkyHorizon;
+        uniform float uFogDensity;
+
         varying vec3 vWorldPosition;
         varying vec3 vNormal;
         varying float vHeight;
@@ -482,10 +484,12 @@
             landColor = mix(landColor, vec3(0.34, 0.42, 0.24), smoothstep(8.0, 14.0, vWorldPosition.y) * 0.7);
             baseColor = mix(baseColor, landColor, aboveT);
 
-            // Distance fog
+            // Distance fog: dissolve into the same sky-horizon backdrop the
+            // ocean fades to, so the floor reads as infinite with no visible
+            // mesh edge. Shares the ocean's fog density for a matched falloff.
             float dist = length(vWorldPosition - uCameraPosition);
-            float fogFactor = exp(-dist * 0.002);
-            baseColor = mix(vec3(0.3, 0.5, 0.7), baseColor, fogFactor);
+            float fogFactor = exp(-dist * uFogDensity);
+            baseColor = mix(uSkyHorizon, baseColor, fogFactor);
             
             // Simple lighting
             vec3 lightDir = normalize(vec3(0.5, 1.0, 0.3));
