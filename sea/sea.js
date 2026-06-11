@@ -27,7 +27,7 @@
  * the accumulated foam along it. Convergent chop then gathers the foam into
  * the streaky downwind webbing of a worked sea instead of static blooms.
  *
- * Version: 0.7.5
+ * Version: 0.8.0
  */
 
 import * as THREE from 'three';
@@ -261,7 +261,10 @@ export class Ocean {
                 uFoamTexture: { value: null },
                 uTime: { value: 0 },
                 uWaterColorDeep: { value: getters.waterColorDeepColor },
+                uWaterColorMid: { value: getters.waterColorMidColor },
                 uWaterColorShallow: { value: getters.waterColorShallowColor },
+                uWaterColorShadow: { value: getters.waterColorShadowColor },
+                uFoamColor: { value: getters.foamColorColor },
                 uSunPosition: { value: getters.sunPositionVector },
                 uFoamThreshold: { value: config.foamThreshold },
                 uCameraPosition: { value: new THREE.Vector3() },
@@ -271,9 +274,6 @@ export class Ocean {
                 uSssStrength: { value: config.sssStrength },
                 uSpecPower: { value: config.specPower },
                 uSpecIntensity: { value: config.specIntensity },
-                uGlitterStrength: { value: config.glitterStrength },
-                uLacingScale: { value: config.foamLacingScale },
-                uFoamCoverage: { value: config.foamCoverage },
                 uWaterContrast: { value: config.waterContrast },
                 uWindDir: { value: getters.windVector },
                 uCrestLean: { value: config.crestLean },
@@ -335,15 +335,16 @@ export class Ocean {
                 uTile: { value: this.fft.tileTexture },
                 uPatch: { value: this.fft.patchSize },
                 uWaterColorDeep: { value: getters.waterColorDeepColor },
+                uWaterColorMid: { value: getters.waterColorMidColor },
                 uWaterColorShallow: { value: getters.waterColorShallowColor },
+                uWaterColorShadow: { value: getters.waterColorShadowColor },
+                uFoamColor: { value: getters.foamColorColor },
+                uWaterContrast: { value: config.waterContrast },
                 uSunPosition: { value: getters.sunPositionVector },
                 uCameraPosition: { value: new THREE.Vector3() },
                 uSssColor: { value: getters.sssColorColor },
                 uSssStrength: { value: config.sssStrength },
-                uSpecPower: { value: config.specPower },
-                uSpecIntensity: { value: config.specIntensity },
                 uSkyHorizon: { value: getters.skyHorizonColor },
-                uSkyZenith: { value: getters.skyZenithColor },
                 uFogDensity: { value: config.fogDensity },
                 uAmpNorm: { value: this.ampNorm },
                 uFoamThreshold: { value: config.foamThreshold },
@@ -398,15 +399,16 @@ export class Ocean {
             uniform sampler2D uTile;
             uniform float uPatch;
             uniform vec3 uWaterColorDeep;
+            uniform vec3 uWaterColorMid;
             uniform vec3 uWaterColorShallow;
+            uniform vec3 uWaterColorShadow;
+            uniform vec3 uFoamColor;
+            uniform float uWaterContrast;
             uniform vec3 uSunPosition;
             uniform vec3 uCameraPosition;
             uniform vec3 uSssColor;
             uniform float uSssStrength;
-            uniform float uSpecPower;
-            uniform float uSpecIntensity;
             uniform vec3 uSkyHorizon;
-            uniform vec3 uSkyZenith;
             uniform float uFogDensity;
             uniform float uAmpNorm;
             uniform float uFoamThreshold;
@@ -438,27 +440,25 @@ export class Ocean {
                 vec3 sunDir = normalize(uSunPosition);
                 vec3 normal = normalize(vNormal);
 
-                float fresnel = pow(1.0 - max(dot(viewDir, normal), 0.0), 5.0);
-                fresnel = mix(0.03, 1.0, fresnel);
-
-                // Same stylised height ramp as the main surface
+                // Same swatch palette and cuts as the main surface, matte:
+                // no sky mirror or warm specular, so the far field keeps the
+                // exact art-directed cyans until the fog takes over
                 float hT = clamp(vDisplacement / uAmpNorm * 0.5 + 0.5, 0.0, 1.0);
-                float rampT = smoothstep(0.15, 0.95, hT);
-                vec3 waterColor = mix(uWaterColorDeep, uWaterColorShallow, rampT);
+                float rampT = clamp(smoothstep(0.15, 0.95, hT), 0.0, 1.0);
+                vec3 waterColor = mix(uWaterColorDeep, uWaterColorMid, smoothstep(0.30, 0.36, rampT));
+                waterColor = mix(waterColor, uWaterColorShallow, smoothstep(0.62, 0.68, rampT));
 
-                // Distant backlit swell still glows faintly
+                // Cel shadow flanks swing towards the shadow swatch
+                float lamShade = max(dot(normal, sunDir), 0.0);
+                float shadeBand = 1.0 - smoothstep(0.28, 0.4, lamShade);
+                waterColor = mix(waterColor, uWaterColorShadow, shadeBand * uWaterContrast);
+
+                // Distant backlit swell still lifts towards the SSS band
                 float backlight = max(dot(viewDir, -sunDir), 0.0);
                 float sss = pow(backlight, 2.5) * max(vDisplacement, 0.0) / uAmpNorm;
-                waterColor += uSssColor * sss * uSssStrength * 0.5;
+                waterColor = mix(waterColor, uSssColor, clamp(sss * uSssStrength * 0.4, 0.0, 1.0));
 
-                vec3 reflDir = reflect(-viewDir, normal);
-                vec3 skyRefl = mix(uSkyHorizon, uSkyZenith, clamp(reflDir.y * 1.6, 0.0, 1.0));
-
-                vec3 halfDir = normalize(viewDir + sunDir);
-                float spec = pow(max(dot(normal, halfDir), 0.0), uSpecPower) * uSpecIntensity;
-
-                vec3 finalColor = mix(waterColor, skyRefl, fresnel * 0.55);
-                finalColor += spec * vec3(1.0, 0.98, 0.9);
+                vec3 finalColor = waterColor;
 
                 float dist = length(vWorldPosition - uCameraPosition);
 
@@ -476,8 +476,8 @@ export class Ocean {
                 float caps = cap * (0.4 + 0.6 * vein) * (0.45 + 0.75 * patchMask);
                 // Unfiltered tile texels alias at extreme range; let the fog own it
                 caps *= exp(-dist * 0.0008);
-                float lam = max(dot(normal, sunDir), 0.0);
-                vec3 foamColor = vec3(0.93, 0.96, 0.97) * (0.55 + 0.45 * lam);
+                float lam = smoothstep(0.42, 0.5, lamShade);
+                vec3 foamColor = mix(mix(uFoamColor, uWaterColorShadow, 0.25), uFoamColor, lam);
                 finalColor = mix(finalColor, foamColor, clamp(caps * 1.6, 0.0, 1.0));
 
                 float fogAmt = 1.0 - exp(-dist * uFogDensity);
@@ -573,16 +573,16 @@ export class Ocean {
 
             // Update visual uniforms
             u.uWaterColorDeep.value.setHex(config.waterColorDeep);
+            u.uWaterColorMid.value.setHex(config.waterColorMid);
             u.uWaterColorShallow.value.setHex(config.waterColorShallow);
+            u.uWaterColorShadow.value.setHex(config.waterColorShadow);
+            u.uFoamColor.value.setHex(config.foamColor);
             u.uSunPosition.value.copy(config.sunPosition);
             u.uFoamThreshold.value = config.foamThreshold;
             u.uSssColor.value.setHex(config.sssColor);
             u.uSssStrength.value = config.sssStrength;
             u.uSpecPower.value = config.specPower;
             u.uSpecIntensity.value = config.specIntensity;
-            u.uGlitterStrength.value = config.glitterStrength;
-            u.uLacingScale.value = config.foamLacingScale;
-            u.uFoamCoverage.value = config.foamCoverage;
             u.uWaterContrast.value = config.waterContrast;
             u.uWindDir.value.copy(getters.windVector);
             u.uCrestLean.value = config.crestLean;
@@ -602,14 +602,15 @@ export class Ocean {
             const s = this.skirtMaterial.uniforms;
             s.uCameraPosition.value.copy(camera.position);
             s.uWaterColorDeep.value.setHex(config.waterColorDeep);
+            s.uWaterColorMid.value.setHex(config.waterColorMid);
             s.uWaterColorShallow.value.setHex(config.waterColorShallow);
+            s.uWaterColorShadow.value.setHex(config.waterColorShadow);
+            s.uFoamColor.value.setHex(config.foamColor);
+            s.uWaterContrast.value = config.waterContrast;
             s.uSunPosition.value.copy(config.sunPosition);
             s.uSssColor.value.setHex(config.sssColor);
             s.uSssStrength.value = config.sssStrength;
-            s.uSpecPower.value = config.specPower;
-            s.uSpecIntensity.value = config.specIntensity;
             s.uSkyHorizon.value.setHex(config.skyColorHorizon);
-            s.uSkyZenith.value.setHex(config.skyColorZenith);
             s.uFogDensity.value = config.fogDensity;
             s.uAmpNorm.value = this.ampNorm;
             s.uFoamThreshold.value = config.foamThreshold;

@@ -7,7 +7,7 @@
  * persisted to localStorage; "Refresh" reloads to apply grid-level changes,
  * "Reset" clears saved values and restores defaults.
  *
- * Version: 0.7.0
+ * Version: 0.8.0
  */
 
 import { config, saveConfigToStorage, clearSavedConfig } from './config.js';
@@ -57,20 +57,22 @@ export class UI {
                         { key: 'foamThreshold', label: 'Coverage', type: 'number', min: 0, max: 1, step: 0.01, description: 'Foam coverage; drives both crest generation and the display cut, higher = more foam' },
                         { key: 'foamDecay', label: 'Decay', type: 'number', min: 0.8, max: 0.999, step: 0.001, description: 'Per-frame foam persistence; closer to 1 = longer-lived foam' },
                         { key: 'foamGrowth', label: 'Growth', type: 'number', min: 0.2, max: 6, step: 0.1, description: 'Foam accumulation rate at the crests' },
-                        { key: 'foamLacingScale', label: 'Lacing Scale', type: 'number', min: 0.01, max: 0.2, step: 0.005, description: 'World-space frequency of the residual foam lacing pattern' },
                     ],
                 },
                 {
                     title: 'Shading',
                     target: config,
                     params: [
-                        { key: 'waterColorDeep', label: 'Deep Color', type: 'color', description: 'Water color in wave troughs (ramp low end)' },
-                        { key: 'waterColorShallow', label: 'Shallow Color', type: 'color', description: 'Water color at wave crests (ramp high end)' },
-                        { key: 'sssColor', label: 'SSS Color', type: 'color', description: 'Colour transmitted through backlit wave crests' },
+                        { key: 'waterColorDeep', label: 'Trough Color', type: 'color', description: 'Palette swatch for wave troughs and dark patches' },
+                        { key: 'waterColorMid', label: 'Base Color', type: 'color', description: 'Dominant palette swatch covering most of the surface' },
+                        { key: 'waterColorShallow', label: 'Lit Color', type: 'color', description: 'Palette swatch for sunlit upper slopes' },
+                        { key: 'waterColorShadow', label: 'Shadow Color', type: 'color', description: 'Desaturated blue the shadowed wave faces swing towards' },
+                        { key: 'foamColor', label: 'Foam Color', type: 'color', description: 'Flat fill for whitecaps, lacing and the sun streak' },
+                        { key: 'waterContrast', label: 'Shade Contrast', type: 'number', min: 0, max: 1, step: 0.05, description: 'How far shadowed flanks swing towards the shadow swatch' },
+                        { key: 'sssColor', label: 'SSS Color', type: 'color', description: 'Near-white band backlit crests snap towards' },
                         { key: 'sssStrength', label: 'SSS Strength', type: 'number', min: 0, max: 4, step: 0.05, description: 'Directional translucency intensity; the hero of the stylised look' },
                         { key: 'specPower', label: 'Spec Power', type: 'number', min: 4, max: 256, step: 2, description: 'Specular exponent; lower = wider highlight band' },
-                        { key: 'specIntensity', label: 'Spec Intensity', type: 'number', min: 0, max: 2, step: 0.05, description: 'Specular brightness' },
-                        { key: 'glitterStrength', label: 'Sun Glitter', type: 'number', min: 0, max: 2, step: 0.05, description: 'Micro-sparkle on top of the wide highlight' },
+                        { key: 'specIntensity', label: 'Spec Intensity', type: 'number', min: 0, max: 2, step: 0.05, description: 'Sun-streak brightness' },
                     ],
                 },
                 {
@@ -137,24 +139,29 @@ export class UI {
                         { key: 'calm', label: 'Calm Seas', type: 'button', onClick: () => this.applyPreset({
                             windSpeed: 6, choppiness: 0.9, waveHeight: 0.8,
                             foamThreshold: 0.85, fogDensity: 0.0008,
-                            waterColorDeep: 0x0d5a66, waterColorShallow: 0x49b8b4,
-                            skyColorHorizon: 0xd6e6ec, skyColorZenith: 0x7db4d8,
-                            sssStrength: 1.8, glitterStrength: 0.8,
+                            waterColorDeep: 0x1fa9ce, waterColorMid: 0x3fd2ea,
+                            waterColorShallow: 0x8fe8f6, waterColorShadow: 0x66b8dc,
+                            foamColor: 0xf6fcfe,
+                            skyColorHorizon: 0x9febf7, skyColorZenith: 0x4fc0dd,
+                            sssStrength: 1.8,
                         }) },
                         { key: 'sunny', label: 'Sunny Swell', type: 'button', onClick: () => this.applyPreset({
                             windSpeed: 16, choppiness: 1.2, waveHeight: 2.0,
                             foamThreshold: 0.75, foamDecay: 0.965, fogDensity: 0.0011,
-                            waterColorDeep: 0x0d4d5e, waterColorShallow: 0x3fa8b0,
-                            skyColorHorizon: 0xcfe3ea, skyColorZenith: 0x6fa8d4,
-                            sssColor: 0x1ba692, sssStrength: 2.0, specPower: 36, glitterStrength: 0.7,
+                            waterColorDeep: 0x139ec7, waterColorMid: 0x27c9e7,
+                            waterColorShallow: 0x76dff3, waterColorShadow: 0x52add6,
+                            foamColor: 0xf4fbfe,
+                            skyColorHorizon: 0x86e7f5, skyColorZenith: 0x37b1d3,
+                            sssColor: 0xcaf7fd, sssStrength: 1.4, specPower: 36,
                         }) },
                         { key: 'overcast', label: 'Overcast Storm', type: 'button', onClick: () => this.applyPreset({
                             windSpeed: 30, choppiness: 1.5, waveHeight: 4.2,
                             foamThreshold: 0.6, foamDecay: 0.975, fogDensity: 0.0018,
-                            waterColorDeep: 0x24343a, waterColorShallow: 0x5d7a76,
+                            waterColorDeep: 0x24343a, waterColorMid: 0x3d575c,
+                            waterColorShallow: 0x5d7a76, waterColorShadow: 0x46606b,
+                            foamColor: 0xdde6e8,
                             skyColorHorizon: 0xb9bdbd, skyColorZenith: 0x73797c,
-                            sssColor: 0x4a7a6a, sssStrength: 0.8, specPower: 24, specIntensity: 0.3,
-                            glitterStrength: 0.15,
+                            sssColor: 0x7a9a92, sssStrength: 0.8, specPower: 24, specIntensity: 0.3,
                         }) },
                         { key: 'randomize', label: 'Randomize', type: 'button', onClick: () => this.applyPreset({
                             windSpeed: 5 + Math.random() * 30,

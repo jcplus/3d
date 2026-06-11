@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="version" content="0.6.0">
+    <meta name="version" content="0.7.0">
     <title>Real-Time Ocean Simulation</title>
     <style>
         * {
@@ -170,7 +170,10 @@
     <script type="x-shader/x-fragment" id="ocean-fragment">
         uniform sampler2D uDisplacementMap;
         uniform vec3 uWaterColorDeep;
+        uniform vec3 uWaterColorMid;
         uniform vec3 uWaterColorShallow;
+        uniform vec3 uWaterColorShadow;
+        uniform vec3 uFoamColor;
         uniform vec3 uSunPosition;
         uniform vec3 uCameraPosition;
         uniform sampler2D uFoamTexture;
@@ -180,9 +183,6 @@
         uniform float uSssStrength;
         uniform float uSpecPower;
         uniform float uSpecIntensity;
-        uniform float uGlitterStrength;
-        uniform float uLacingScale;
-        uniform float uFoamCoverage;
         uniform float uWaterContrast;
         uniform vec2 uWindDir;
         uniform vec3 uSkyHorizon;
@@ -270,46 +270,38 @@
             float fresnel = pow(1.0 - max(dot(viewDir, normal), 0.0), 5.0);
             fresnel = mix(0.03, 1.0, fresnel);
 
-            // === Toon cel water colour ===
-            // Painterly, non-photoreal shading: the continuous height/grazing
-            // grade is posterised into a few hard steps so each swell reads as
-            // flat colour blocks rather than a smooth gradient.
+            // === Toon cel water colour (swatch-accurate) ===
+            // The palette swatches are the exact colours that reach the screen
+            // pre-fog: every band SELECTS between swatches, never multiplies,
+            // so hue and saturation cannot drift away from the art direction.
             float hT = clamp(vDisplacement / uAmpNorm * 0.5 + 0.5, 0.0, 1.0);
             float grazing = pow(1.0 - max(dot(viewDir, normal), 0.0), 2.0);
-            float rampT = clamp(smoothstep(0.1, 0.95, hT) * 0.7 + grazing * 0.3, 0.0, 1.0);
-            // Quantise into 3 flat bands (deep / mid / bright). A narrow
-            // smoothstep across each boundary keeps the steps anti-aliased.
-            float bands = 3.0;
-            float scaled = rampT * bands;
-            float stepIdx = floor(scaled);
-            float stepFrac = smoothstep(0.35, 0.65, fract(scaled));
-            rampT = clamp((stepIdx + stepFrac) / bands, 0.0, 1.0);
-            vec3 waterColor = mix(uWaterColorDeep, uWaterColorShallow, rampT);
-            // Deepen troughs / lift crests so the flat bands read as distinct
-            // value steps rather than near-identical teals.
-            waterColor *= mix(0.62, 1.12, rampT);
+            float rampT = clamp(smoothstep(0.1, 0.95, hT) * 0.75 + grazing * 0.25, 0.0, 1.0);
 
-            // Three-tone diffuse: two hard sun/shade splits give every wave a
-            // flat lit flank, a mid flank and a flat shadow flank (cel shading).
-            float lambert = max(dot(normal, sunDir), 0.0);
-            float litBand = smoothstep(0.42, 0.5, lambert);
-            float midBand = smoothstep(0.2, 0.28, lambert);
-            float toonShade = mix(1.0 - 0.4 * uWaterContrast,
-                                  mix(1.0 - 0.18 * uWaterContrast, 1.0, litBand), midBand);
-            waterColor *= toonShade;
-
-            // Watercolour mottle: a slow world-space wash that nudges value up
-            // and down, so the flat bands read as painted rather than plastic.
+            // Watercolour mottle nudges texels across the band boundaries so
+            // the flat fills stay painterly without tinting the swatches.
             float mottle = snoise(vWorldPosition.xz * 0.035) * 0.5
                          + snoise(vWorldPosition.xz * 0.11 + 7.0) * 0.25;
-            waterColor *= 1.0 + mottle * 0.12;
+            rampT = clamp(rampT + mottle * 0.10, 0.0, 1.0);
+
+            // Two hard cuts split the surface into trough / base / lit fills
+            float cutDeep = smoothstep(0.30, 0.36, rampT);
+            float cutLit  = smoothstep(0.62, 0.68, rampT);
+            vec3 waterColor = mix(uWaterColorDeep, uWaterColorMid, cutDeep);
+            waterColor = mix(waterColor, uWaterColorShallow, cutLit);
+
+            // Cel shadow: flanks facing away from the sun swing towards the
+            // desaturated slope blue, not towards a darkened copy of the base
+            float lambert = max(dot(normal, sunDir), 0.0);
+            float litBand = smoothstep(0.42, 0.5, lambert);
+            float shadeBand = 1.0 - smoothstep(0.28, 0.4, lambert);
+            waterColor = mix(waterColor, uWaterColorShadow, shadeBand * uWaterContrast);
 
             // === Painted backlight band (flat, replaces physical SSS) ===
-            // Tall backlit crests get a single flat translucent-green band
-            // instead of a continuous transmission falloff.
+            // Tall backlit crests snap to a single near-white translucent band
             float backlight = max(dot(viewDir, -sunDir), 0.0);
             float sssBand = smoothstep(0.45, 0.6, backlight * clamp(hT + 0.15, 0.0, 1.0));
-            waterColor = mix(waterColor, waterColor + uSssColor, sssBand * uSssStrength * 0.6);
+            waterColor = mix(waterColor, uSssColor, sssBand * clamp(uSssStrength * 0.4, 0.0, 1.0));
 
             // === Painted highlight (hard-edged, replaces specular + glitter) ===
             // A flat, stepped sun streak — no shimmering micro-sparkle.
@@ -347,12 +339,13 @@
             float shoreFoam = smoothstep(0.8, 1.0, vSweSpeed) * vSweMask;
 
             float foamMix = clamp(whitecap + trailing * 0.6 + shoreFoam, 0.0, 1.0);
-            // Foam is flat white with only a 2-step shade to hint at form.
-            vec3 foamColor = vec3(0.97, 0.99, 1.0) * mix(0.85, 1.0, litBand);
+            // Foam is the flat palette white; shadowed foam dips towards the
+            // shadow swatch instead of grey so it stays inside the palette.
+            vec3 foamColor = mix(mix(uFoamColor, uWaterColorShadow, 0.25), uFoamColor, litBand);
 
             // === Combine (matte: no Fresnel sky mirror) ===
             vec3 finalColor = waterColor;
-            finalColor = mix(finalColor, vec3(1.0, 0.99, 0.92), hiBand * uSpecIntensity * 0.6);
+            finalColor = mix(finalColor, uFoamColor, hiBand * uSpecIntensity * 0.6);
             finalColor = mix(finalColor, foamColor, foamMix);
 
             // === Atmospheric perspective ===

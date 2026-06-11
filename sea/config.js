@@ -4,7 +4,7 @@
  * Uses Proxy-based reactive state management.
  * All modules read from this single source of truth.
  *
- * Version: 0.7.0
+ * Version: 0.8.0
  */
 
 import * as THREE from 'three';
@@ -37,16 +37,15 @@ const defaultConfig = {
     foamGrowth: 2.0,
 
     // Stylised shading
-    sssStrength: 1.6,        // Directional translucency through backlit crests
-    sssColor: 0x1ba692,      // Colour transmitted through thin wave tops
+    sssStrength: 1.4,        // Directional translucency through backlit crests
+    sssColor: 0xcaf7fd,      // Near-white cyan the backlit crest band swings towards
     specPower: 40.0,         // Specular exponent; lower = wider highlight band
-    specIntensity: 0.55,     // Specular brightness
-    glitterStrength: 0.55,   // Sun glitter micro-sparkle on top of the wide highlight
-    foamLacingScale: 0.06,   // World-space frequency of residual foam lacing pattern
+    specIntensity: 0.45,     // Specular brightness
+    waterContrast: 0.55,     // How far shadowed flanks swing towards the shadow swatch
 
     // Atmosphere
-    skyColorZenith: 0x5d86ad,
-    skyColorHorizon: 0xbccdd6,
+    skyColorZenith: 0x37b1d3,
+    skyColorHorizon: 0x86e7f5,
     fogDensity: 0.0011,
 
     // Near-shore shallow water (L2): a fixed patch at the world origin with a
@@ -71,9 +70,14 @@ const defaultConfig = {
     sprayFoam: 1.0,            // Foam left where spray takes off and lands
     sprayPoolRes: 128,         // Particle pool is sprayPoolRes^2 (refresh to apply)
 
-    // Visual settings
-    waterColorDeep: 0x0d4d5e,
-    waterColorShallow: 0x3fa8b0,
+    // Visual settings: a four-swatch cel palette sampled from the target
+    // frame. Bands pick between swatches directly (no value multipliers),
+    // so these hex values are exactly what reaches the screen pre-fog.
+    waterColorDeep: 0x139ec7,     // Trough / dark patch swatch
+    waterColorMid: 0x27c9e7,      // Dominant base swatch
+    waterColorShallow: 0x76dff3,  // Lit slope swatch (ramp high end)
+    waterColorShadow: 0x52add6,   // Desaturated blue of shadowed wave faces
+    foamColor: 0xf4fbfe,          // Whitecap / lacing fill
     sunPosition: { x: 100, y: 200, z: 100 },
     
     // Grid settings
@@ -268,6 +272,18 @@ export const getters = {
 
     get waterColorShallowColor() {
         return new THREE.Color(config.waterColorShallow);
+    },
+
+    get waterColorMidColor() {
+        return new THREE.Color(config.waterColorMid);
+    },
+
+    get waterColorShadowColor() {
+        return new THREE.Color(config.waterColorShadow);
+    },
+
+    get foamColorColor() {
+        return new THREE.Color(config.foamColor);
     },
 
     get sunPositionVector() {
