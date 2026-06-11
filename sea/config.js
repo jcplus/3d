@@ -1,8 +1,10 @@
 /**
  * config.js - Central State Management
- * 
+ *
  * Uses Proxy-based reactive state management.
  * All modules read from this single source of truth.
+ *
+ * Version: 0.3.0
  */
 
 import * as THREE from 'three';
@@ -19,14 +21,35 @@ const defaultConfig = {
     choppiness: 2, // Range: 0.8 - 1.5
     timeScale: 0.75,
     
+    // Wave spectrum (three explicit bands: macro swell / wind sea / chop)
+    swellWavelength: 320.0, // Base wavelength of the longest swell layer (m)
+    swellAmount: 1.0,       // Macro swell steepness scale
+    windSeaAmount: 1.0,     // Mid-frequency wind sea steepness scale
+    chopAmount: 1.0,        // High-frequency chop scale (geometry + normal detail)
+    crestSkew: 0.55,        // Forward lean of crests along travel direction (0 = symmetric)
+    detailFadeStart: 0.18,  // Fraction of grid size where high-frequency bands start fading
+
     // Foam physics
     foamDecay: 0.96,
     foamThreshold: 0.8, // Range: 0.6 - 0.9 (Higher = more foam generated but higher cutoff for display)
     foamGrowth: 2.0,
-    
+
+    // Stylised shading
+    sssStrength: 1.6,        // Directional translucency through backlit crests
+    sssColor: 0x1ba692,      // Colour transmitted through thin wave tops
+    specPower: 40.0,         // Specular exponent; lower = wider highlight band
+    specIntensity: 0.55,     // Specular brightness
+    glitterStrength: 0.55,   // Sun glitter micro-sparkle on top of the wide highlight
+    foamLacingScale: 0.06,   // World-space frequency of residual foam lacing pattern
+
+    // Atmosphere
+    skyColorZenith: 0x5d86ad,
+    skyColorHorizon: 0xbccdd6,
+    fogDensity: 0.0011,
+
     // Visual settings
-    waterColorDeep: 0x001e0f,
-    waterColorShallow: 0x006994,
+    waterColorDeep: 0x0d4d5e,
+    waterColorShallow: 0x3fa8b0,
     sunPosition: { x: 100, y: 200, z: 100 },
     
     // Grid settings
@@ -225,5 +248,17 @@ export const getters = {
 
     get sunPositionVector() {
         return new THREE.Vector3(config.sunPosition.x, config.sunPosition.y, config.sunPosition.z);
+    },
+
+    get sssColorColor() {
+        return new THREE.Color(config.sssColor);
+    },
+
+    get skyZenithColor() {
+        return new THREE.Color(config.skyColorZenith);
+    },
+
+    get skyHorizonColor() {
+        return new THREE.Color(config.skyColorHorizon);
     }
 };

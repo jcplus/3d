@@ -5,12 +5,24 @@
  * positions stay stable. Wave physics is evaluated in absolute world
  * coordinates; foam history is reprojected when the grid moves.
  *
- * Version: 0.2.0
+ * The wave spectrum is synthesised on the CPU into three explicit bands
+ * (macro swell / wind sea / chop) and uploaded as uniform arrays, so the
+ * physics pass and the far-field skirt evaluate the exact same field.
+ *
+ * Version: 0.3.0
  */
 
 import * as THREE from 'three';
 import { GPUComputationRenderer } from 'three/addons/misc/GPUComputationRenderer.js';
 import { config, getters } from './config.js';
+
+const WAVE_COUNT = 12;
+const SWELL_COUNT = 3;
+
+// Fixed per-layer pseudo-random values so the spectrum is deterministic
+// across sessions (direction jitter in [-1, 1], phase in [0, 100])
+const DIR_RAND = [0.0, 0.0, 0.0, 0.31, -0.74, 0.52, -0.18, 0.88, -0.61, 0.43, -0.95, 0.69];
+const PHASE_RAND = [12.4, 71.3, 38.9, 5.7, 93.2, 47.6, 81.1, 23.8, 66.4, 14.9, 58.2, 30.5];
 
 export class Ocean {
     constructor(renderer, scene) {
@@ -20,24 +32,121 @@ export class Ocean {
         // World-space grid origin, snapped to whole patches each frame
         this.gridOffset = new THREE.Vector2(0, 0);
 
+        // Spectrum uniform storage, rebuilt each frame from config
+        this.waveA = Array.from({ length: WAVE_COUNT }, () => new THREE.Vector4());
+        this.waveB = Array.from({ length: WAVE_COUNT }, () => new THREE.Vector4());
+        this.waveC = Array.from({ length: WAVE_COUNT }, () => new THREE.Vector2());
+        this.ampNorm = 1.0;
+        this.buildSpectrum();
+
         this.initGPGPU();
         this.createMesh();
+        this.createSkirt();
         this.createSpraySystem();
     }
-    
+
+    /**
+     * Build the three-band spectrum into the uniform arrays.
+     *
+     * Band layout (index / fade weight):
+     *   0-2   macro swell  (fade 0: survives to the horizon, narrow spread)
+     *   3-8   wind sea     (fade grows with frequency, spread widens)
+     *   9-11  chop         (fade 1: near-field only; geometry share reduced,
+     *                       the rest of the detail lives in fragment normals)
+     *
+     * waveA = (dir.x, dir.y, wavenumber k, angular speed omega)
+     * waveB = (amplitude, phase, distance-fade weight, horizontal factor Q)
+     * waveC = (crest sharpening exponent, unused)
+     */
+    buildSpectrum() {
+        const storm = THREE.MathUtils.clamp((config.windSpeed - 5.0) / 30.0, 0, 1);
+        const windRad = config.windDirection * Math.PI / 180;
+        const speedScale = 1.0 + storm * 0.5;
+        const layers = [];
+
+        // Macro swell: long period, low steepness, direction spread within ~10 degrees
+        const swellLambda = [1.0, 1.75, 0.8];
+        const swellDirOff = [-0.14, 0.09, -0.05];
+        const swellSteepMul = [1.0, 0.7, 0.55];
+        const swellSteep = (0.05 + 0.18 * storm) * config.swellAmount;
+        for (let j = 0; j < SWELL_COUNT; j++) {
+            layers.push({
+                wavelength: Math.max(config.swellWavelength * swellLambda[j], 40.0),
+                dir: windRad + swellDirOff[j],
+                steep: swellSteep * swellSteepMul[j],
+                ampScale: 1.0,
+                fade: 0.0,
+                sharp: 1.0 + storm * 0.8,
+            });
+        }
+
+        // Wind sea: mid frequencies, spread widens towards short waves
+        // (long waves stay close to the wind direction, as in real spectra)
+        const windLambda0 = 18.0 + Math.pow(config.windSpeed, 1.45);
+        const windSteep0 = (0.06 + 0.13 * storm) * config.choppiness * config.windSeaAmount;
+        for (let j = 0; j < 6; j++) {
+            const spread = 0.18 + 0.55 * (j / 5);
+            layers.push({
+                wavelength: Math.max(windLambda0 * Math.pow(0.62, j), 9.0),
+                dir: windRad + DIR_RAND[SWELL_COUNT + j] * spread,
+                steep: windSteep0 * Math.pow(0.9, j),
+                ampScale: 1.0,
+                fade: 0.55 + 0.45 * (j / 5),
+                sharp: 1.0 + storm * 2.5,
+            });
+        }
+
+        // Chop: high frequencies with reduced geometric share
+        const chopLambda = [7.5, 4.8, 3.1];
+        for (let j = 0; j < 3; j++) {
+            layers.push({
+                wavelength: chopLambda[j],
+                dir: windRad + DIR_RAND[9 + j] * 0.9,
+                steep: 0.16 * config.choppiness * config.chopAmount,
+                ampScale: 0.35,
+                fade: 1.0,
+                sharp: 1.0 + storm * 3.0,
+            });
+        }
+
+        // Normalise the summed horizontal factor so stacked layers
+        // cannot self-intersect at the crests
+        let qSum = 0;
+        layers.forEach(l => {
+            l.steep = Math.min(l.steep, 0.85);
+            qSum += l.steep;
+        });
+        const qScale = qSum > 1.1 ? 1.1 / qSum : 1.0;
+
+        layers.forEach((l, i) => {
+            const k = 2 * Math.PI / l.wavelength;
+            const c = Math.sqrt(9.8 / k);
+            const amp = (l.steep / k) * l.ampScale;
+            this.waveA[i].set(Math.cos(l.dir), Math.sin(l.dir), k, k * c * speedScale);
+            this.waveB[i].set(amp, PHASE_RAND[i], l.fade, l.steep * qScale);
+            this.waveC[i].set(l.sharp, 0);
+        });
+
+        // Reference amplitude for shading ramps (typical crest height)
+        this.ampNorm = Math.max(
+            (this.waveB[0].x + this.waveB[1].x + this.waveB[2].x) * 0.7 + this.waveB[3].x * 0.5,
+            0.5
+        );
+    }
+
     initGPGPU() {
         this.gpuCompute = new GPUComputationRenderer(config.gridResolution, config.gridResolution, this.renderer);
-        
+
         if (this.renderer.capabilities.isWebGL2 === false) {
             throw new Error('WebGL 2.0 is required');
         }
-        
+
         const displacementTexture = this.gpuCompute.createTexture();
         const foamTexture = this.gpuCompute.createTexture();
-        
+
         // Variable: Physics
-        this.physicsVariable = this.gpuCompute.addVariable('texturePhysics', 
-            this.getWaveComputeShader(), 
+        this.physicsVariable = this.gpuCompute.addVariable('texturePhysics',
+            this.getWaveComputeShader(),
             displacementTexture
         );
 
@@ -46,112 +155,54 @@ export class Ocean {
             this.getFoamAccumulateShader(),
             foamTexture
         );
-        
-        this.gpuCompute.setVariableDependencies(this.physicsVariable, []); 
+
+        this.gpuCompute.setVariableDependencies(this.physicsVariable, []);
         this.gpuCompute.setVariableDependencies(this.foamVariable, [this.foamVariable, this.physicsVariable]);
-        
+
         const error = this.gpuCompute.init();
         if (error !== null) {
             console.error('GPGPU Init Error:', error);
         }
-        
+
         this.setupUniforms();
     }
-    
+
     setupUniforms() {
         this.timeUniform = { value: 0 };
-        
+
         // === Physics Uniforms ===
         const physUniforms = this.physicsVariable.material.uniforms;
         physUniforms['uTime'] = this.timeUniform;
         physUniforms['uGridSize'] = { value: this.gridSize };
         physUniforms['uGridOffset'] = { value: new THREE.Vector2(0, 0) };
-        physUniforms['uChoppiness'] = { value: config.choppiness };
-        physUniforms['uWindDirection'] = { value: getters.windVector };
-        physUniforms['uWindSpeed'] = { value: config.windSpeed };
+        physUniforms['uCrestSkew'] = { value: config.crestSkew };
+        physUniforms['uFadeStart'] = { value: config.detailFadeStart * this.gridSize };
+        physUniforms['uWaveA'] = { value: this.waveA };
+        physUniforms['uWaveB'] = { value: this.waveB };
+        physUniforms['uWaveC'] = { value: this.waveC };
 
         // === Foam Uniforms ===
         const foamUniforms = this.foamVariable.material.uniforms;
         foamUniforms['uTime'] = this.timeUniform;
         foamUniforms['uDecay'] = { value: config.foamDecay };
         foamUniforms['uThreshold'] = { value: config.foamThreshold };
+        foamUniforms['uGrowth'] = { value: config.foamGrowth };
         foamUniforms['uUVOffset'] = { value: new THREE.Vector2(0, 0) };
-        
+
         this.physUniforms = physUniforms;
         this.foamUniforms = foamUniforms;
     }
-    
+
     getWaveComputeShader() {
         return `
             uniform float uTime;
             uniform float uGridSize;
             uniform vec2 uGridOffset;
-            uniform float uChoppiness;
-            uniform vec2 uWindDirection;
-            uniform float uWindSpeed;
-
-            // Pseudo-random number
-            vec2 hash22(vec2 p) {
-                p = vec2(dot(p,vec2(127.1,311.7)), dot(p,vec2(269.5,183.3)));
-                return -1.0 + 2.0*fract(sin(p)*43758.5453123);
-            }
-
-            // Rotation
-            vec2 rotate(vec2 v, float a) {
-                float s = sin(a);
-                float c = cos(a);
-                return vec2(v.x * c - v.y * s, v.x * s + v.y * c);
-            }
-
-            void calculateGerstnerWave(
-                vec2 worldPos, vec2 direction, float steepness, float wavelength, float speed, float phaseOffset, float stormIntensity, float waveIndex,
-                inout vec3 positionOffset, inout float jacobianAccumulator
-            ) {
-                float k = 2.0 * 3.14159 / wavelength;
-                float c = sqrt(9.8 / k);
-                vec2 d = normalize(direction);
-                
-                float f = k * (dot(d, worldPos) - c * uTime * speed) + phaseOffset;
-                float a = steepness / k; // base amplitude
-                
-                float sinf = sin(f);
-                float cosf = cos(f);
-                
-                // Absolute cusp waveform
-                // Uses 1.0 - abs(sin(x)) to produce mathematically sharp cusps (non-differentiable points)
-                // Peaks reach 1.0 at f = 0, PI, 2π..., producing extremely sharp crests
-                
-                float baseShape = 1.0 - abs(sinf); 
-                
-                // Sharpening exponent: stronger wind = sharper crests (concave)
-                // Range: 1.0 (linear triangle) → 3.0 (spiked cusp)
-                float peakK = 1.0 + stormIntensity * 3.0; 
-                
-                float shaped = pow(baseShape, peakK);
-                
-                // Map amplitude: 
-                // shaped ranges 0 (trough) to 1 (peak)
-                // Troughs remain flat at the bottom, peaks are sharp and pointed
-                float h = shaped * a; 
-                
-                // Horizontal displacement:
-                // With this cusp algorithm, strong horizontal Gerstner displacement is not needed for peak formation
-                // But keep slight horizontal displacement for liveliness, especially with large waves
-                float horizontalFactor = cosf * steepness * 0.5; // halved to prevent clipping
-                
-                // High-frequency wave attenuation
-                float weight = 1.0 - clamp(waveIndex / 10.0, 0.0, 1.0);
-                weight = pow(weight, 2.0);
-                
-                positionOffset.x += d.x * horizontalFactor * a * weight;
-                positionOffset.z += d.y * horizontalFactor * a * weight;
-                
-                // Vertical displacement: subtract mean height (0.3) to keep sea level balanced
-                positionOffset.y += (h - 0.3 * a) * weight; 
-                
-                // Jacobian estimate (not required to be precise, only used for foam generation)
-                jacobianAccumulator += steepness * k * baseShape * weight; 
-            }
+            uniform float uCrestSkew;
+            uniform float uFadeStart;
+            uniform vec4 uWaveA[${WAVE_COUNT}];
+            uniform vec4 uWaveB[${WAVE_COUNT}];
+            uniform vec2 uWaveC[${WAVE_COUNT}];
 
             void main() {
                 vec2 uv = gl_FragCoord.xy / resolution.xy;
@@ -159,58 +210,65 @@ export class Ocean {
                 // world position, so the grid can translate without seams
                 vec2 worldPos = (uv - 0.5) * uGridSize + uGridOffset;
 
-                // Domain Warping
+                // Distance from the grid centre (~camera). Short bands fade
+                // with distance so the far field keeps only the coherent
+                // macro swell rhythm, and the outer rim matches the skirt.
+                float r = length((uv - 0.5) * uGridSize);
+                float halfSize = uGridSize * 0.5;
+                float distFade = smoothstep(uFadeStart, halfSize * 0.95, r);
+                float edgeCut = smoothstep(halfSize * 0.8, halfSize * 0.95, r);
+
+                // Gentle domain warp for the short bands only; the swell
+                // keeps its direction coherence
                 vec2 warp = vec2(
                     sin(worldPos.y * 0.005 + uTime * 0.1),
                     cos(worldPos.x * 0.005 + uTime * 0.1)
-                );
-                worldPos += warp * 15.0;
-                
+                ) * 12.0;
+
                 vec3 displacement = vec3(0.0);
                 float jacobianSum = 0.0;
-                
-                float stormIntensity = clamp((uWindSpeed - 5.0) / 30.0, 0.0, 1.0);
-                
-                // Wavelength: exponential growth to simulate swell
-                float wLen = 30.0 + pow(uWindSpeed, 1.55); 
-                float steep = 0.25 * uChoppiness;
-                vec2 mainWindDir = normalize(uWindDirection);
-                float speed = 1.0 + stormIntensity * 0.6; 
-                
-                for(int i = 0; i < 12; i++) {
-                    vec2 seed = vec2(float(i) * 13.0, float(i) * 7.0);
-                    vec2 rnd = hash22(seed); 
-                    
-                    // Random direction
-                    float chaos = 0.3 + float(i) * 0.1 + stormIntensity * 0.5; 
-                    vec2 dir = rotate(mainWindDir, rnd.x * chaos * 2.5);
-                    
-                    // Random scale
-                    float randomScale = 1.0 + rnd.y * 0.7 * stormIntensity;
-                    
-                    // Swell boost for large waves
-                    float swellBoost = 1.0;
-                    if (i < 3) swellBoost = 1.0 + stormIntensity * 1.8; 
 
-                    // Steepness calculation (hard clamp at 0.85 to prevent flying vertices)
-                    float currentSteepness = steep * randomScale * swellBoost;
-                    currentSteepness *= (1.0 - float(i) * 0.06); 
-                    currentSteepness = clamp(currentSteepness, 0.0, 0.85);
+                for (int i = 0; i < ${WAVE_COUNT}; i++) {
+                    vec2 d = uWaveA[i].xy;
+                    float k = uWaveA[i].z;
+                    float omega = uWaveA[i].w;
+                    float amp = uWaveB[i].x;
+                    float phase = uWaveB[i].y;
+                    float fadeAmt = uWaveB[i].z;
+                    float q = uWaveB[i].w;
+                    float sharp = uWaveC[i].x;
 
-                    float phaseOffset = rnd.y * 100.0;
+                    float atten = 1.0 - distFade * fadeAmt;
+                    if (fadeAmt > 0.001) atten *= 1.0 - edgeCut;
+                    if (atten < 0.002) continue;
 
-                    calculateGerstnerWave(
-                        worldPos, dir, currentSteepness, wLen, speed, phaseOffset, stormIntensity, float(i),
-                        displacement, jacobianSum
-                    );
-                    
-                    // Iteration parameters
-                    wLen *= 0.58;   
-                    steep *= 0.82;
-                    speed *= 1.07;
+                    vec2 p = worldPos + warp * fadeAmt;
+                    float f = k * dot(d, p) - omega * uTime + phase;
+                    // Phase warp: compresses the front face and stretches the
+                    // back, so crests lean forward along the travel direction
+                    f -= uCrestSkew * cos(f);
+
+                    float sinf = sin(f);
+                    float cosf = cos(f);
+
+                    // Cusp waveform: flat troughs, sharp crests
+                    float baseShape = 1.0 - abs(sinf);
+                    float shaped = pow(baseShape, sharp);
+
+                    float a = amp * atten;
+                    // Subtract approximate waveform mean to keep sea level balanced
+                    displacement.y += (shaped - 0.3) * a;
+                    // Full Gerstner horizontal displacement: sharpens crests
+                    // and hollows the leaning front faces
+                    displacement.x += d.x * cosf * q * a;
+                    displacement.z += d.y * cosf * q * a;
+
+                    // Foam source estimate: crest compression, weighted
+                    // towards the short bands (swell alone should not foam)
+                    jacobianSum += q * shaped * (0.35 + 0.65 * fadeAmt) * atten;
                 }
-                
-                float jacobian = 1.0 - jacobianSum;
+
+                float jacobian = 1.0 - jacobianSum * 1.2;
                 gl_FragColor = vec4(displacement, jacobian);
             }
         `;
@@ -220,6 +278,7 @@ export class Ocean {
         return `
             uniform float uDecay;
             uniform float uThreshold;
+            uniform float uGrowth;
             uniform float uTime;
             uniform vec2 uUVOffset;
 
@@ -238,19 +297,19 @@ export class Ocean {
                 if (prevUv.x >= 0.0 && prevUv.x <= 1.0 && prevUv.y >= 0.0 && prevUv.y <= 1.0) {
                     prevFoam = texture2D(textureFoam, prevUv).r;
                 }
-                
+
                 // 3. Generate and blend
                 float generation = smoothstep(uThreshold, uThreshold - 0.2, jacobian);
-                generation = clamp(generation, 0.0, 1.0) * 0.15;
-                
+                generation = clamp(generation, 0.0, 1.0) * 0.075 * uGrowth;
+
                 float foam = prevFoam * uDecay + generation;
                 foam = clamp(foam, 0.0, 1.0);
-                
+
                 gl_FragColor = vec4(foam, 0.0, 0.0, 1.0);
             }
         `;
     }
-    
+
     createMesh() {
         const geometry = new THREE.PlaneGeometry(
             this.gridSize,
@@ -269,7 +328,7 @@ export class Ocean {
 
         const vertexShader = document.getElementById('ocean-vertex').textContent;
         const fragmentShader = document.getElementById('ocean-fragment').textContent;
-        
+
         this.material = new THREE.ShaderMaterial({
             vertexShader: vertexShader,
             fragmentShader: fragmentShader,
@@ -284,6 +343,17 @@ export class Ocean {
                 uCameraPosition: { value: new THREE.Vector3() },
                 uGridSize: { value: this.gridSize },
                 uGridResolution: { value: config.gridResolution },
+                uSssColor: { value: getters.sssColorColor },
+                uSssStrength: { value: config.sssStrength },
+                uSpecPower: { value: config.specPower },
+                uSpecIntensity: { value: config.specIntensity },
+                uGlitterStrength: { value: config.glitterStrength },
+                uLacingScale: { value: config.foamLacingScale },
+                uSkyHorizon: { value: getters.skyHorizonColor },
+                uSkyZenith: { value: getters.skyZenithColor },
+                uFogDensity: { value: config.fogDensity },
+                uChopAmount: { value: config.chopAmount },
+                uAmpNorm: { value: this.ampNorm },
             },
             transparent: true,
         });
@@ -291,17 +361,185 @@ export class Ocean {
         this.mesh = new THREE.Mesh(geometry, this.material);
         this.mesh.position.set(0, config.seaLevel, 0); // snapped to camera each frame
         // Ensure the mesh is not frustum-culled due to its size
-        this.mesh.frustumCulled = false; 
-        
+        this.mesh.frustumCulled = false;
+
         this.scene.add(this.mesh);
     }
-    
+
+    /**
+     * Far-field skirt: a camera-following ring from the grid edge out to the
+     * horizon. It evaluates only the swell band of the same spectrum, so it
+     * joins the grid (whose short bands fade to zero at the rim) seamlessly.
+     * Radial vertex spacing grows exponentially: dense near the grid edge,
+     * coarse in the fog-dominated distance.
+     */
+    createSkirt() {
+        const inner = this.gridSize * 0.5 * 0.99;
+        const outer = 9000;
+        const geometry = new THREE.RingGeometry(inner, outer, 160, 28);
+        geometry.rotateX(-Math.PI / 2);
+
+        const pos = geometry.attributes.position;
+        for (let i = 0; i < pos.count; i++) {
+            const x = pos.getX(i);
+            const z = pos.getZ(i);
+            const r = Math.hypot(x, z);
+            if (r < 1e-3) continue;
+            const t = (r - inner) / (outer - inner);
+            const rNew = inner * Math.pow(outer / inner, t);
+            const s = rNew / r;
+            pos.setX(i, x * s);
+            pos.setZ(i, z * s);
+        }
+
+        this.skirtMaterial = new THREE.ShaderMaterial({
+            vertexShader: this.getSkirtVertexShader(),
+            fragmentShader: this.getSkirtFragmentShader(),
+            uniforms: {
+                uTime: this.timeUniform,
+                uCrestSkew: { value: config.crestSkew },
+                uWaveA: { value: this.waveA.slice(0, SWELL_COUNT) },
+                uWaveB: { value: this.waveB.slice(0, SWELL_COUNT) },
+                uWaveC: { value: this.waveC.slice(0, SWELL_COUNT) },
+                uWaterColorDeep: { value: getters.waterColorDeepColor },
+                uWaterColorShallow: { value: getters.waterColorShallowColor },
+                uSunPosition: { value: getters.sunPositionVector },
+                uCameraPosition: { value: new THREE.Vector3() },
+                uSssColor: { value: getters.sssColorColor },
+                uSssStrength: { value: config.sssStrength },
+                uSpecPower: { value: config.specPower },
+                uSpecIntensity: { value: config.specIntensity },
+                uSkyHorizon: { value: getters.skyHorizonColor },
+                uSkyZenith: { value: getters.skyZenithColor },
+                uFogDensity: { value: config.fogDensity },
+                uAmpNorm: { value: this.ampNorm },
+            },
+        });
+
+        this.skirt = new THREE.Mesh(geometry, this.skirtMaterial);
+        // Sit slightly below the main grid so the overlap never z-fights
+        this.skirt.position.set(0, config.seaLevel - 0.4, 0);
+        this.skirt.frustumCulled = false;
+        this.scene.add(this.skirt);
+    }
+
+    getSkirtVertexShader() {
+        return `
+            uniform float uTime;
+            uniform float uCrestSkew;
+            uniform vec4 uWaveA[${SWELL_COUNT}];
+            uniform vec4 uWaveB[${SWELL_COUNT}];
+            uniform vec2 uWaveC[${SWELL_COUNT}];
+
+            varying vec3 vWorldPosition;
+            varying vec3 vNormal;
+            varying float vDisplacement;
+
+            // Same cusp Gerstner formulation as the physics pass, swell band only
+            vec3 swellOffset(vec2 p) {
+                vec3 off = vec3(0.0);
+                for (int i = 0; i < ${SWELL_COUNT}; i++) {
+                    vec2 d = uWaveA[i].xy;
+                    float k = uWaveA[i].z;
+                    float omega = uWaveA[i].w;
+                    float amp = uWaveB[i].x;
+                    float phase = uWaveB[i].y;
+                    float q = uWaveB[i].w;
+                    float sharp = uWaveC[i].x;
+
+                    float f = k * dot(d, p) - omega * uTime + phase;
+                    f -= uCrestSkew * cos(f);
+                    float shaped = pow(1.0 - abs(sin(f)), sharp);
+                    float cosf = cos(f);
+
+                    off.y += (shaped - 0.3) * amp;
+                    off.x += d.x * cosf * q * amp;
+                    off.z += d.y * cosf * q * amp;
+                }
+                return off;
+            }
+
+            void main() {
+                vec3 base = (modelMatrix * vec4(position, 1.0)).xyz;
+                vec3 off = swellOffset(base.xz);
+
+                // Finite-difference normal from the swell field
+                float e = 4.0;
+                vec3 offX = swellOffset(base.xz + vec2(e, 0.0));
+                vec3 offZ = swellOffset(base.xz + vec2(0.0, e));
+                vec3 tx = vec3(e, 0.0, 0.0) + (offX - off);
+                vec3 tz = vec3(0.0, 0.0, e) + (offZ - off);
+                vNormal = normalize(cross(tz, tx));
+
+                vec3 wp = base + off;
+                vWorldPosition = wp;
+                vDisplacement = off.y;
+                gl_Position = projectionMatrix * viewMatrix * vec4(wp, 1.0);
+            }
+        `;
+    }
+
+    getSkirtFragmentShader() {
+        return `
+            uniform vec3 uWaterColorDeep;
+            uniform vec3 uWaterColorShallow;
+            uniform vec3 uSunPosition;
+            uniform vec3 uCameraPosition;
+            uniform vec3 uSssColor;
+            uniform float uSssStrength;
+            uniform float uSpecPower;
+            uniform float uSpecIntensity;
+            uniform vec3 uSkyHorizon;
+            uniform vec3 uSkyZenith;
+            uniform float uFogDensity;
+            uniform float uAmpNorm;
+
+            varying vec3 vWorldPosition;
+            varying vec3 vNormal;
+            varying float vDisplacement;
+
+            void main() {
+                vec3 viewDir = normalize(uCameraPosition - vWorldPosition);
+                vec3 sunDir = normalize(uSunPosition);
+                vec3 normal = normalize(vNormal);
+
+                float fresnel = pow(1.0 - max(dot(viewDir, normal), 0.0), 5.0);
+                fresnel = mix(0.03, 1.0, fresnel);
+
+                // Same stylised height ramp as the main surface
+                float hT = clamp(vDisplacement / uAmpNorm * 0.5 + 0.5, 0.0, 1.0);
+                float rampT = smoothstep(0.15, 0.95, hT);
+                vec3 waterColor = mix(uWaterColorDeep, uWaterColorShallow, rampT);
+
+                // Distant backlit swell still glows faintly
+                float backlight = max(dot(viewDir, -sunDir), 0.0);
+                float sss = pow(backlight, 2.5) * max(vDisplacement, 0.0) / uAmpNorm;
+                waterColor += uSssColor * sss * uSssStrength * 0.5;
+
+                vec3 reflDir = reflect(-viewDir, normal);
+                vec3 skyRefl = mix(uSkyHorizon, uSkyZenith, clamp(reflDir.y * 1.6, 0.0, 1.0));
+
+                vec3 halfDir = normalize(viewDir + sunDir);
+                float spec = pow(max(dot(normal, halfDir), 0.0), uSpecPower) * uSpecIntensity;
+
+                vec3 finalColor = mix(waterColor, skyRefl, fresnel * 0.55);
+                finalColor += spec * vec3(1.0, 0.98, 0.9);
+
+                float dist = length(vWorldPosition - uCameraPosition);
+                float fogAmt = 1.0 - exp(-dist * uFogDensity);
+                finalColor = mix(finalColor, uSkyHorizon, fogAmt);
+
+                gl_FragColor = vec4(finalColor, 1.0);
+            }
+        `;
+    }
+
     createSpraySystem() {
         const particleCount = 10000;
         const geometry = new THREE.BufferGeometry();
         const positions = new Float32Array(particleCount * 3);
         const randoms = new Float32Array(particleCount);
-        
+
         for (let i = 0; i < particleCount; i++) {
             // Particles distributed across the entire grid
             positions[i * 3] = (Math.random() - 0.5) * this.gridSize;
@@ -309,10 +547,10 @@ export class Ocean {
             positions[i * 3 + 2] = (Math.random() - 0.5) * this.gridSize;
             randoms[i] = Math.random();
         }
-        
+
         geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
         geometry.setAttribute('aRandom', new THREE.BufferAttribute(randoms, 1));
-        
+
         const material = new THREE.ShaderMaterial({
             uniforms: {
                 uDisplacementMap: { value: null },
@@ -327,26 +565,26 @@ export class Ocean {
                 uniform float uTime;
                 attribute float aRandom;
                 varying float vAlpha;
-                
+
                 void main() {
                     vec3 pos = position;
                     // Grid-local coordinates map to texture UV; the Points
                     // object itself follows the grid offset
                     vec2 uv = (pos.xz / uGridSize) + 0.5;
-                    
+
                     vec4 disp = texture2D(uDisplacementMap, uv);
                     pos.x += disp.x;
                     pos.y += disp.y;
                     pos.z += disp.z;
-                    
+
                     float foam = texture2D(uFoamTexture, uv).r;
                     float foamIntensity = smoothstep(0.6, 0.9, foam);
-                    
+
                     float life = fract(uTime * 0.8 + aRandom);
-                    pos.y += sin(life * 3.14) * 8.0 * foamIntensity; 
-                    
+                    pos.y += sin(life * 3.14) * 8.0 * foamIntensity;
+
                     vAlpha = foamIntensity * (1.0 - life);
-                    
+
                     vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
                     gl_Position = projectionMatrix * mvPosition;
                     gl_PointSize = 6.0 * (300.0 / -mvPosition.z);
@@ -365,15 +603,19 @@ export class Ocean {
             depthWrite: false,
             blending: THREE.AdditiveBlending
         });
-        
+
         this.spraySystem = new THREE.Points(geometry, material);
         this.spraySystem.position.set(0, config.seaLevel, 0); // snapped to camera each frame
         this.spraySystem.frustumCulled = false;
         this.scene.add(this.spraySystem);
     }
-    
+
     update(deltaTime, camera) {
         this.timeUniform.value = config.time;
+
+        // Rebuild the spectrum from config (cheap: 12 layers on the CPU).
+        // The skirt shares the same Vector4 instances for its swell band.
+        this.buildSpectrum();
 
         // Snap the grid to the camera in whole-patch steps so vertex world
         // positions stay stable (no swimming)
@@ -381,13 +623,13 @@ export class Ocean {
         const offsetX = Math.floor(camera.position.x / patch) * patch;
         const offsetZ = Math.floor(camera.position.z / patch) * patch;
 
-        if(this.physUniforms) {
-            this.physUniforms.uChoppiness.value = config.choppiness;
-            this.physUniforms.uWindSpeed.value = config.windSpeed;
-            this.physUniforms.uWindDirection.value.copy(getters.windVector);
+        if (this.physUniforms) {
             this.physUniforms.uGridOffset.value.set(offsetX, offsetZ);
+            this.physUniforms.uCrestSkew.value = config.crestSkew;
+            this.physUniforms.uFadeStart.value = config.detailFadeStart * this.gridSize;
             this.foamUniforms.uDecay.value = config.foamDecay;
             this.foamUniforms.uThreshold.value = config.foamThreshold;
+            this.foamUniforms.uGrowth.value = config.foamGrowth;
             // Reprojection delta: where this frame's texel lived in last frame's UV space
             this.foamUniforms.uUVOffset.value.set(
                 (offsetX - this.gridOffset.x) / this.gridSize,
@@ -398,31 +640,65 @@ export class Ocean {
         this.gridOffset.set(offsetX, offsetZ);
         this.mesh.position.set(offsetX, config.seaLevel, offsetZ);
         this.spraySystem.position.set(offsetX, config.seaLevel, offsetZ);
+        this.skirt.position.set(offsetX, config.seaLevel - 0.4, offsetZ);
 
         this.gpuCompute.compute();
-        
+
         const physicsTexture = this.gpuCompute.getCurrentRenderTarget(this.physicsVariable).texture;
         const foamTexture = this.gpuCompute.getCurrentRenderTarget(this.foamVariable).texture;
-        
+
         if (this.material) {
-            this.material.uniforms.uDisplacementMap.value = physicsTexture;
-            this.material.uniforms.uFoamTexture.value = foamTexture;
-            this.material.uniforms.uCameraPosition.value.copy(camera.position);
-            
+            const u = this.material.uniforms;
+            u.uDisplacementMap.value = physicsTexture;
+            u.uFoamTexture.value = foamTexture;
+            u.uCameraPosition.value.copy(camera.position);
+            u.uTime.value = config.time;
+
             // Update visual uniforms
-            this.material.uniforms.uWaterColorDeep.value.setHex(config.waterColorDeep);
-            this.material.uniforms.uWaterColorShallow.value.setHex(config.waterColorShallow);
-            this.material.uniforms.uSunPosition.value.copy(config.sunPosition);
+            u.uWaterColorDeep.value.setHex(config.waterColorDeep);
+            u.uWaterColorShallow.value.setHex(config.waterColorShallow);
+            u.uSunPosition.value.copy(config.sunPosition);
+            u.uFoamThreshold.value = config.foamThreshold;
+            u.uSssColor.value.setHex(config.sssColor);
+            u.uSssStrength.value = config.sssStrength;
+            u.uSpecPower.value = config.specPower;
+            u.uSpecIntensity.value = config.specIntensity;
+            u.uGlitterStrength.value = config.glitterStrength;
+            u.uLacingScale.value = config.foamLacingScale;
+            u.uSkyHorizon.value.setHex(config.skyColorHorizon);
+            u.uSkyZenith.value.setHex(config.skyColorZenith);
+            u.uFogDensity.value = config.fogDensity;
+            u.uChopAmount.value = config.chopAmount;
+            u.uAmpNorm.value = this.ampNorm;
         }
-        
+
+        if (this.skirtMaterial) {
+            const s = this.skirtMaterial.uniforms;
+            s.uCrestSkew.value = config.crestSkew;
+            s.uCameraPosition.value.copy(camera.position);
+            s.uWaterColorDeep.value.setHex(config.waterColorDeep);
+            s.uWaterColorShallow.value.setHex(config.waterColorShallow);
+            s.uSunPosition.value.copy(config.sunPosition);
+            s.uSssColor.value.setHex(config.sssColor);
+            s.uSssStrength.value = config.sssStrength;
+            s.uSpecPower.value = config.specPower;
+            s.uSpecIntensity.value = config.specIntensity;
+            s.uSkyHorizon.value.setHex(config.skyColorHorizon);
+            s.uSkyZenith.value.setHex(config.skyColorZenith);
+            s.uFogDensity.value = config.fogDensity;
+            s.uAmpNorm.value = this.ampNorm;
+        }
+
         if (this.spraySystem) {
             this.spraySystem.material.uniforms.uDisplacementMap.value = physicsTexture;
             this.spraySystem.material.uniforms.uFoamTexture.value = foamTexture;
+            this.spraySystem.material.uniforms.uTime.value = config.time;
         }
     }
-    
+
     dispose() {
         this.scene.remove(this.mesh);
+        this.scene.remove(this.skirt);
         this.scene.remove(this.spraySystem);
     }
 }

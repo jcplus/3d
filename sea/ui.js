@@ -6,6 +6,8 @@
  * the panel propagate to the simulation automatically. Every change is
  * persisted to localStorage; "Refresh" reloads to apply grid-level changes,
  * "Reset" clears saved values and restores defaults.
+ *
+ * Version: 0.3.0
  */
 
 import { config, saveConfigToStorage, clearSavedConfig } from './config.js';
@@ -37,19 +39,47 @@ export class UI {
                     ],
                 },
                 {
+                    title: 'Spectrum',
+                    target: config,
+                    params: [
+                        { key: 'swellWavelength', label: 'Swell Length', type: 'number', min: 100, max: 600, step: 10, description: 'Base wavelength of the macro swell band in meters' },
+                        { key: 'swellAmount', label: 'Swell Amount', type: 'number', min: 0, max: 2, step: 0.05, description: 'Macro swell steepness scale; sets the long-wave rhythm' },
+                        { key: 'windSeaAmount', label: 'Wind Sea', type: 'number', min: 0, max: 2, step: 0.05, description: 'Mid-frequency wind sea steepness scale' },
+                        { key: 'chopAmount', label: 'Chop', type: 'number', min: 0, max: 2, step: 0.05, description: 'High-frequency chop: small geometry share plus fragment normal detail' },
+                        { key: 'crestSkew', label: 'Crest Skew', type: 'number', min: 0, max: 1, step: 0.05, description: 'Forward lean of crests along the travel direction' },
+                        { key: 'detailFadeStart', label: 'Detail Fade', type: 'number', min: 0.05, max: 0.45, step: 0.01, description: 'Fraction of grid size where short waves start fading into the distance' },
+                    ],
+                },
+                {
                     title: 'Foam',
                     target: config,
                     params: [
                         { key: 'foamThreshold', label: 'Threshold', type: 'number', min: 0, max: 1, step: 0.01, description: 'Jacobian threshold for foam generation; higher = more foam' },
                         { key: 'foamDecay', label: 'Decay', type: 'number', min: 0.8, max: 0.999, step: 0.001, description: 'Per-frame foam persistence; closer to 1 = longer-lived foam' },
+                        { key: 'foamGrowth', label: 'Growth', type: 'number', min: 0.2, max: 6, step: 0.1, description: 'Foam accumulation rate at the crests' },
+                        { key: 'foamLacingScale', label: 'Lacing Scale', type: 'number', min: 0.01, max: 0.2, step: 0.005, description: 'World-space frequency of the residual foam lacing pattern' },
                     ],
                 },
                 {
-                    title: 'Visual',
+                    title: 'Shading',
                     target: config,
                     params: [
-                        { key: 'waterColorDeep', label: 'Deep Color', type: 'color', description: 'Water color in deep areas / wave troughs' },
-                        { key: 'waterColorShallow', label: 'Shallow Color', type: 'color', description: 'Water color in shallow areas / wave crests' },
+                        { key: 'waterColorDeep', label: 'Deep Color', type: 'color', description: 'Water color in wave troughs (ramp low end)' },
+                        { key: 'waterColorShallow', label: 'Shallow Color', type: 'color', description: 'Water color at wave crests (ramp high end)' },
+                        { key: 'sssColor', label: 'SSS Color', type: 'color', description: 'Colour transmitted through backlit wave crests' },
+                        { key: 'sssStrength', label: 'SSS Strength', type: 'number', min: 0, max: 4, step: 0.05, description: 'Directional translucency intensity; the hero of the stylised look' },
+                        { key: 'specPower', label: 'Spec Power', type: 'number', min: 4, max: 256, step: 2, description: 'Specular exponent; lower = wider highlight band' },
+                        { key: 'specIntensity', label: 'Spec Intensity', type: 'number', min: 0, max: 2, step: 0.05, description: 'Specular brightness' },
+                        { key: 'glitterStrength', label: 'Sun Glitter', type: 'number', min: 0, max: 2, step: 0.05, description: 'Micro-sparkle on top of the wide highlight' },
+                    ],
+                },
+                {
+                    title: 'Atmosphere',
+                    target: config,
+                    params: [
+                        { key: 'skyColorHorizon', label: 'Horizon', type: 'color', description: 'Sky colour at the horizon; also the fog colour' },
+                        { key: 'skyColorZenith', label: 'Zenith', type: 'color', description: 'Sky colour straight up' },
+                        { key: 'fogDensity', label: 'Fog Density', type: 'number', min: 0.0001, max: 0.005, step: 0.0001, description: 'Exponential distance fog towards the horizon colour' },
                     ],
                 },
                 {
@@ -74,13 +104,35 @@ export class UI {
                     title: 'Presets',
                     target: {},
                     params: [
-                        { key: 'calm', label: 'Calm Seas', type: 'button', onClick: () => this.applyPreset({ windSpeed: 5, choppiness: 0.9, foamThreshold: 0.5 }) },
-                        { key: 'stormy', label: 'Stormy Seas', type: 'button', onClick: () => this.applyPreset({ windSpeed: 20, choppiness: 1.4, foamThreshold: 0.85 }) },
+                        { key: 'calm', label: 'Calm Seas', type: 'button', onClick: () => this.applyPreset({
+                            windSpeed: 6, choppiness: 1.0, swellAmount: 0.8, crestSkew: 0.3,
+                            foamThreshold: 0.85, fogDensity: 0.0008,
+                            waterColorDeep: 0x0d5a66, waterColorShallow: 0x49b8b4,
+                            skyColorHorizon: 0xd6e6ec, skyColorZenith: 0x7db4d8,
+                            sssStrength: 1.8, glitterStrength: 0.8,
+                        }) },
+                        { key: 'sunny', label: 'Sunny Swell', type: 'button', onClick: () => this.applyPreset({
+                            windSpeed: 16, choppiness: 1.6, swellAmount: 1.1, windSeaAmount: 1.0,
+                            crestSkew: 0.55, foamThreshold: 0.75, foamDecay: 0.965, fogDensity: 0.0011,
+                            waterColorDeep: 0x0d4d5e, waterColorShallow: 0x3fa8b0,
+                            skyColorHorizon: 0xcfe3ea, skyColorZenith: 0x6fa8d4,
+                            sssColor: 0x1ba692, sssStrength: 2.0, specPower: 36, glitterStrength: 0.7,
+                        }) },
+                        { key: 'overcast', label: 'Overcast Storm', type: 'button', onClick: () => this.applyPreset({
+                            windSpeed: 30, choppiness: 2.2, swellAmount: 1.3, windSeaAmount: 1.3,
+                            crestSkew: 0.7, foamThreshold: 0.6, foamDecay: 0.975, fogDensity: 0.0018,
+                            waterColorDeep: 0x24343a, waterColorShallow: 0x5d7a76,
+                            skyColorHorizon: 0xb9bdbd, skyColorZenith: 0x73797c,
+                            sssColor: 0x4a7a6a, sssStrength: 0.8, specPower: 24, specIntensity: 0.3,
+                            glitterStrength: 0.15,
+                        }) },
                         { key: 'randomize', label: 'Randomize', type: 'button', onClick: () => this.applyPreset({
                             windSpeed: 5 + Math.random() * 30,
                             choppiness: 0.5 + Math.random() * 2,
                             windDirection: Math.random() * 360,
-                            foamThreshold: 0.2 + Math.random() * 0.5,
+                            swellAmount: 0.6 + Math.random() * 0.9,
+                            crestSkew: Math.random() * 0.8,
+                            foamThreshold: 0.5 + Math.random() * 0.4,
                         }) },
                     ],
                 },

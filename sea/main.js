@@ -2,10 +2,12 @@
  * main.js - Main Application Entry Point
  * * Responsibilities:
  * - WebGLRenderer initialization
- * - Scene setup
+ * - Scene setup (sky dome gradient unified with the ocean fog colour)
  * - Custom camera controller (Standard First-Person WASD)
  * - Render loop
  * - Input event handling
+ *
+ * Version: 0.3.0
  */
 
 import * as THREE from 'three';
@@ -241,7 +243,7 @@ class OceanSimulation {
         // Enable WebGL 2.0 features
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
         this.renderer.setSize(window.innerWidth, window.innerHeight);
-        this.renderer.setClearColor(0x87CEEB, 1); // Sky blue
+        this.renderer.setClearColor(config.skyColorHorizon, 1);
         
         this.container.appendChild(this.renderer.domElement);
         
@@ -254,8 +256,58 @@ class OceanSimulation {
     
     setupScene() {
         this.scene = new THREE.Scene();
-        // Add fog for depth
-        this.scene.fog = new THREE.FogExp2(0x87CEEB, 0.0005);
+        this.setupSky();
+    }
+
+    /**
+     * Sky dome: horizon-to-zenith gradient plus a soft sun glow. The horizon
+     * colour doubles as the fog colour in the water shaders, so the ocean
+     * dissolves into the sky with no visible boundary.
+     */
+    setupSky() {
+        const geometry = new THREE.SphereGeometry(9200, 32, 16);
+        this.skyMaterial = new THREE.ShaderMaterial({
+            side: THREE.BackSide,
+            depthWrite: false,
+            uniforms: {
+                uHorizonColor: { value: getters.skyHorizonColor },
+                uZenithColor: { value: getters.skyZenithColor },
+                uSunPosition: { value: getters.sunPositionVector },
+            },
+            vertexShader: `
+                varying vec3 vDir;
+                void main() {
+                    vDir = normalize(position);
+                    // Render behind everything regardless of dome radius
+                    vec4 pos = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    gl_Position = pos.xyww;
+                }
+            `,
+            fragmentShader: `
+                uniform vec3 uHorizonColor;
+                uniform vec3 uZenithColor;
+                uniform vec3 uSunPosition;
+                varying vec3 vDir;
+                void main() {
+                    vec3 dir = normalize(vDir);
+                    // Below the horizon stays at the horizon colour so the
+                    // ocean fog always finds a matching backdrop
+                    float t = pow(clamp(dir.y, 0.0, 1.0), 0.55);
+                    vec3 sky = mix(uHorizonColor, uZenithColor, t);
+
+                    // Soft sun disc and wide glow
+                    vec3 sunDir = normalize(uSunPosition);
+                    float sunDot = max(dot(dir, sunDir), 0.0);
+                    sky += vec3(1.0, 0.95, 0.85) * pow(sunDot, 350.0) * 1.2;
+                    sky += vec3(1.0, 0.97, 0.9) * pow(sunDot, 12.0) * 0.18;
+
+                    gl_FragColor = vec4(sky, 1.0);
+                }
+            `,
+        });
+        this.sky = new THREE.Mesh(geometry, this.skyMaterial);
+        this.sky.frustumCulled = false;
+        this.scene.add(this.sky);
     }
     
     setupLights() {
@@ -327,7 +379,14 @@ class OceanSimulation {
         
         // Update sun position
         this.sunLight.position.copy(config.sunPosition);
-        
+
+        // Keep the sky dome centred on the camera and in sync with config
+        this.sky.position.copy(this.camera.position);
+        this.skyMaterial.uniforms.uHorizonColor.value.setHex(config.skyColorHorizon);
+        this.skyMaterial.uniforms.uZenithColor.value.setHex(config.skyColorZenith);
+        this.skyMaterial.uniforms.uSunPosition.value.copy(config.sunPosition);
+        this.renderer.setClearColor(config.skyColorHorizon, 1);
+
         // Update controller
         this.controller.update(deltaTime);
         

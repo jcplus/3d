@@ -524,6 +524,96 @@ for (let i = 0; i < uvAttr.count; i++) {
 
 ---
 
+## 12. 频谱分带与前倾浪峰（M1.5）
+
+### 12.1 三段式波带
+
+单一几何级数频谱（`wLen *= 0.58` 一路衰减 + 所有层同等方向扰动）的问题：
+最长波也带 ±80° 的方向离散，主导方向被打散，海面呈"被风吹皱的山脉"。
+修正为 CPU 侧显式构建三段波带，作为 uniform 数组上传：
+
+| 波带 | 层数 | 波长 | 方向离散 | 距离衰减权重 fade |
+|------|------|------|----------|--------------------|
+| macro swell | 3 | `swellWavelength × {1.0, 1.75, 0.8}`（约 200~600m） | ≤ ±10°（固定小偏角） | 0（直达地平线） |
+| wind sea | 6 | `18 + windSpeed^1.45` 起 ×0.62 衰减 | ±10° → ±42° 随频率展宽 | 0.55 → 1.0 |
+| chop | 3 | 7.5 / 4.8 / 3.1 m | ±50° | 1.0（仅近场） |
+
+要点：
+
+- **方向离散随频率增大**（真实方向谱的定性特征）：长波窄、短波宽，
+  保证远观存在单一主导涌浪方向。
+- **chop 几何占比砍至 0.35**，省下的细节在 fragment 里以两octave 噪声梯度
+  扰动法线补回，且随相机距离 `smoothstep(420, 70, dist)` 收敛——远景不闪。
+- **水平位移防穿插**：各层水平因子 Q = steepness，CPU 侧求和，
+  超过 1.1 时整体等比缩小（`qScale = 1.1 / ΣQ`）。
+- 每层数据打包：`waveA = (dir.x, dir.y, k, ω)`、
+  `waveB = (amplitude, phase, fade, Q)`、`waveC = (sharp, _)`，每帧重建（12 层，CPU 开销可忽略）。
+
+### 12.2 距离相关简化
+
+物理 pass 内按 texel 到纹理中心的世界距离 r（网格跟随相机，中心 ≈ 相机）做两级衰减：
+
+```glsl
+float distFade = smoothstep(fadeStart, halfSize * 0.95, r);   // 按 fade 权重渐隐
+float edgeCut  = smoothstep(halfSize * 0.8, halfSize * 0.95, r); // 非 swell 波带在网格边缘强制归零
+float atten = 1.0 - distFade * fade;
+if (fade > 0.0) atten *= 1.0 - edgeCut;
+```
+
+非 swell 波带在网格边缘归零后，外圈裙边网格（环形、径向指数分布顶点）只需
+在 vertex shader 里求值同一组 swell 层（共享同一批 uniform Vector4 实例），
+即可与主网格无缝衔接；剩余差异由与天空地平线色统一的指数雾遮蔽。
+
+### 12.3 前倾浪峰（相位扭曲）
+
+尖峰波形 `shaped = (1 - |sin f|)^sharp` 本身前后对称。在求值波形前做相位扭曲：
+
+```glsl
+f -= skew * cos(f);
+```
+
+推导：相位对空间的导数 `dF/dx = k·(1 + skew·sin f)`。浪峰在 f ≈ 0 处，
+**迎波面**（f > 0，sin f > 0）相位变化更快 → 波形被压缩 → 前坡陡；
+**背波面**（f < 0）被拉伸 → 后坡缓。配合恢复的完整 Gerstner 水平位移
+`xz += d · cos(f) · Q · a`（M1 时代曾砍半），浪峰显著前倾、迎面中空。
+skew 取 0~1；>1 时相位映射非单调，波形出现自折叠，需避免。
+
+Jacobian 泡沫源同步改为按波带加权的启发式：
+
+```glsl
+jacobianSum += Q * shaped * (0.35 + 0.65 * fade) * atten;
+```
+
+swell 单独不产生白沫（权重 0.35），白沫集中在 wind sea / chop 浪峰压缩处。
+
+### 12.4 泡沫三级层级
+
+泡沫仍存单通道累积值 F，按值域分段着色（threshold = 显示阈值 T）：
+
+| 层级 | 判据 | 表现 |
+|------|------|------|
+| crest whitecap | `F > T` 或瞬时 `1 - jacobian > 0.5` | 锐利、近纯白，受朗伯光照 |
+| trailing foam | `0.45T < F < T` | 半透拖尾，气泡噪声调制 |
+| residual lacing | `0.05 < F < 0.45T` | 世界空间双 octave `1-|snoise|` 脉络纹理调制的残留花纹 |
+
+### 12.5 风格化着色组合
+
+```
+finalColor = mix(waterRamp, skyReflection, fresnel * 0.55)
+           + (wideSpec + glitter) * sunTint
+finalColor = mix(finalColor, foamColor, foamHierarchy)
+finalColor = mix(finalColor, horizonColor, 1 - exp(-dist * fogDensity * heightFactor))
+```
+
+- **waterRamp**：深/浅水色按 `浪高(0.75) + 掠射角(0.25)` 的风格化 ramp，非物理混合；
+- **定向透光（主视觉）**：`pow(dot(view, -sun), 2.5) × 浪高薄度 × (1 - lambert)`，
+  背光浪体透出可调 SSS 色；
+- **宽幅高光**：指数从 128 降为可调（默认 40），叠加 `pow(spec, 240) × 噪声闪烁` 的 sun glitter；
+- **大气统一**：雾色 = 天空地平线色 = 裙边远端色 = 清屏色，海天交界不可见；
+  雾按 距离 × 高度（波谷略多）双因子。
+
+---
+
 ## 附录：数学常数
 
 | 常数 | 值 | 说明 |
