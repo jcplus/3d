@@ -93,7 +93,7 @@ function createStyles() {
         .panel-content {
             overflow: hidden;
             transition: max-height 0.3s ease, opacity 0.3s ease;
-            max-height: 2000px;
+            max-height: 8000px;
             opacity: 1;
         }
 
