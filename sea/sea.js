@@ -27,7 +27,7 @@
  * the accumulated foam along it. Convergent chop then gathers the foam into
  * the streaky downwind webbing of a worked sea instead of static blooms.
  *
- * Version: 0.7.4
+ * Version: 0.7.5
  */
 
 import * as THREE from 'three';
@@ -86,7 +86,8 @@ export class Ocean {
      * refresh the shading reference amplitude.
      */
     updateSpectrum(force = false) {
-        const key = [config.windSpeed, config.windDirection, config.waveHeight, config.choppiness].join(',');
+        const key = [config.windSpeed, config.windDirection, config.waveHeight, config.choppiness,
+            config.swellDirSpread, config.rippleSuppress].join(',');
         if (!force && key === this.spectrumKey) return;
         this.spectrumKey = key;
 
@@ -96,6 +97,8 @@ export class Ocean {
             windDir: new THREE.Vector2(Math.cos(windRad), Math.sin(windRad)),
             waveHeight: config.waveHeight,
             choppiness: config.choppiness,
+            swellSpread: config.swellDirSpread,
+            rippleCutoff: config.rippleSuppress,
         });
         this.ampNorm = Math.max(config.waveHeight * 2.5, 0.5);
     }
@@ -278,6 +281,7 @@ export class Ocean {
                 uSkyZenith: { value: getters.skyZenithColor },
                 uFogDensity: { value: config.fogDensity },
                 uChopAmount: { value: config.chopAmount },
+                uDetailPatchiness: { value: config.detailPatchiness },
                 uAmpNorm: { value: this.ampNorm },
                 uSweTexture: { value: null },
                 uSweOrigin: { value: SWE_ORIGIN },
@@ -586,6 +590,7 @@ export class Ocean {
             u.uSkyZenith.value.setHex(config.skyColorZenith);
             u.uFogDensity.value = config.fogDensity;
             u.uChopAmount.value = config.chopAmount;
+            u.uDetailPatchiness.value = config.detailPatchiness;
             u.uAmpNorm.value = this.ampNorm;
             // Freshest SWE state for the surface blend
             u.uSweTexture.value = this.swe.getStateTexture();

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="version" content="0.5.0">
+    <meta name="version" content="0.6.0">
     <title>Real-Time Ocean Simulation</title>
     <style>
         * {
@@ -189,6 +189,7 @@
         uniform vec3 uSkyZenith;
         uniform float uFogDensity;
         uniform float uChopAmount;
+        uniform float uDetailPatchiness;
         uniform float uAmpNorm;
 
         varying vec3 vWorldPosition;
@@ -242,6 +243,17 @@
             float detailAmp = uChopAmount * smoothstep(420.0, 70.0, dist);
             vec3 normal = normalize(vNormal);
             if (detailAmp > 0.001) {
+                // Wind-lane patchiness: the ripple field arrives in drifting
+                // downwind streaks with glassy gaps between them, instead of
+                // one uniform carpet of identical dimples covering everything.
+                vec2 w = normalize(uWindDir);
+                vec2 lane = vec2(dot(vWorldPosition.xz, w) * 0.35,
+                                 dot(vWorldPosition.xz, vec2(-w.y, w.x)));
+                float patches = snoise(lane * 0.016 + uTime * 0.02) * 0.6
+                              + snoise(lane * 0.045 - uTime * 0.013) * 0.4;
+                patches = smoothstep(-0.35, 0.55, patches);
+                detailAmp *= mix(1.0, patches, uDetailPatchiness);
+
                 vec2 drift = vec2(0.6, 0.8) * uTime;
                 float e = 0.35;
                 vec2 p1 = vWorldPosition.xz * 0.55 + drift * 1.1;

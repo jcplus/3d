@@ -7,7 +7,7 @@
  * persisted to localStorage; "Refresh" reloads to apply grid-level changes,
  * "Reset" clears saved values and restores defaults.
  *
- * Version: 0.6.0
+ * Version: 0.7.0
  */
 
 import { config, saveConfigToStorage, clearSavedConfig } from './config.js';
@@ -44,7 +44,10 @@ export class UI {
                     target: config,
                     params: [
                         { key: 'waveHeight', label: 'Wave Height', type: 'number', min: 0, max: 8, step: 0.1, description: 'RMS surface height in metres; the master wave-height gain' },
+                        { key: 'swellDirSpread', label: 'Crest Length', type: 'number', min: 1, max: 16, step: 0.5, description: 'Directional spread exponent at the spectral peak; higher = longer, more parallel swell crests' },
+                        { key: 'rippleSuppress', label: 'Ripple Cutoff', type: 'number', min: 0, max: 3, step: 0.05, description: 'Metre-scale spectrum rolloff; higher removes more of the uniform micro-chop' },
                         { key: 'chopAmount', label: 'Detail', type: 'number', min: 0, max: 2, step: 0.05, description: 'High-frequency normal detail injected in the fragment shader' },
+                        { key: 'detailPatchiness', label: 'Detail Patchiness', type: 'number', min: 0, max: 1, step: 0.05, description: 'Breaks the detail ripples into drifting wind lanes with glassy gaps; 0 = uniform' },
                     ],
                 },
                 {

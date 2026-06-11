@@ -16,7 +16,7 @@
  * per parameter change, so `waveHeight` is a predictable metre-scale gain
  * independent of wind speed, patch size or the internal spectrum constant.
  *
- * Version: 0.1.0
+ * Version: 0.2.0
  */
 
 import * as THREE from 'three';
@@ -174,6 +174,8 @@ export class FFTOcean {
                 uniform float uPatch;
                 uniform float uWindSpeed;
                 uniform vec2 uWindDir;
+                uniform float uSwellSpread;
+                uniform float uRipple;
 
                 float hash(vec2 p) {
                     p = fract(p * vec2(123.34, 456.21));
@@ -199,11 +201,21 @@ export class FFTOcean {
                     float L = uWindSpeed * uWindSpeed / ${GRAVITY.toFixed(4)};
                     float kL = kl * L;
                     float ph = ${PHILLIPS_A.toFixed(4)} * exp(-1.0 / (kL * kL)) / (kk * kk);
+                    // Frequency-dependent directional spread: waves near the
+                    // spectral peak stay long-crested (high exponent), while
+                    // bands octaves above it fan out into broad chop. This is
+                    // what separates a readable dominant swell from an
+                    // isotropic crosshatch of identical ripples.
                     float kdotw = dot(k / kl, uWindDir);
-                    ph *= kdotw * kdotw;                 // cosine-squared directionality
+                    float octave = clamp(log2(max(kL * 1.4142136, 1.0)) * 0.25, 0.0, 1.0);
+                    float spread = mix(uSwellSpread, 2.0, octave);
+                    ph *= pow(abs(kdotw), spread);
                     if (kdotw < 0.0) ph *= 0.07;         // damp waves against the wind
-                    float small = L * 0.001;
-                    ph *= exp(-kk * small * small);      // suppress sub-grid ripples
+                    // Metre-scale ripple cutoff: the k^-4 spectrum carries near
+                    // constant slope variance per octave, so without a real
+                    // rolloff the normals are dominated by the smallest
+                    // resolvable waves everywhere at once
+                    ph *= exp(-kk * uRipple * uRipple);
 
                     float h0 = sqrt(max(ph, 0.0) * 0.5);
                     fragColor = vec4(gaussian(vec2(ic)) * h0, 0.0, 0.0);
@@ -214,6 +226,8 @@ export class FFTOcean {
                 uPatch: { value: this.patchSize },
                 uWindSpeed: { value: 10.0 },
                 uWindDir: { value: new THREE.Vector2(1, 0) },
+                uSwellSpread: { value: 6.0 },
+                uRipple: { value: 0.8 },
             },
         });
 
@@ -414,16 +428,18 @@ export class FFTOcean {
      * Rebuild the seed spectrum and renormalise the height gain. Cheap to call,
      * but only needs to run when wind, patch or wave-height settings change.
      */
-    setParams({ windSpeed, windDir, waveHeight, choppiness }) {
+    setParams({ windSpeed, windDir, waveHeight, choppiness, swellSpread, rippleCutoff }) {
         this.choppiness = choppiness;
 
         const u = this.h0Material.uniforms;
         u.uWindSpeed.value = windSpeed;
         u.uWindDir.value.copy(windDir);
+        u.uSwellSpread.value = swellSpread;
+        u.uRipple.value = rippleCutoff;
         this._runPass(this.h0Material, this.h0Target);
 
         // Integrate the spectrum RMS so waveHeight maps to metres of RMS height
-        const rms = this._spectrumRms(windSpeed, windDir);
+        const rms = this._spectrumRms(windSpeed, windDir, swellSpread, rippleCutoff);
         this.heightScale = waveHeight / Math.max(rms, 1e-6);
         this.resolveMaterial.uniforms.uHeightScale.value = this.heightScale;
         this.resolveMaterial.uniforms.uChoppiness.value = choppiness;
@@ -431,10 +447,9 @@ export class FFTOcean {
         this.renderer.setRenderTarget(null);
     }
 
-    _spectrumRms(windSpeed, windDir) {
+    _spectrumRms(windSpeed, windDir, swellSpread, rippleCutoff) {
         const N = this.size;
         const L = windSpeed * windSpeed / GRAVITY;
-        const small = L * 0.001;
         const wx = windDir.x;
         const wy = windDir.y;
         let sum = 0;
@@ -450,9 +465,12 @@ export class FFTOcean {
                 const kL = kl * L;
                 let ph = PHILLIPS_A * Math.exp(-1.0 / (kL * kL)) / (kk * kk);
                 const kdotw = (kx * wx + ky * wy) / kl;
-                ph *= kdotw * kdotw;
+                const octave = Math.min(Math.max(
+                    Math.log2(Math.max(kL * Math.SQRT2, 1.0)) * 0.25, 0.0), 1.0);
+                const spread = swellSpread + (2.0 - swellSpread) * octave;
+                ph *= Math.pow(Math.abs(kdotw), spread);
                 if (kdotw < 0) ph *= 0.07;
-                ph *= Math.exp(-kk * small * small);
+                ph *= Math.exp(-kk * rippleCutoff * rippleCutoff);
                 sum += ph;
             }
         }

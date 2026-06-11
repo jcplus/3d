@@ -4,7 +4,7 @@
  * Uses Proxy-based reactive state management.
  * All modules read from this single source of truth.
  *
- * Version: 0.6.0
+ * Version: 0.7.0
  */
 
 import * as THREE from 'three';
@@ -25,6 +25,9 @@ const defaultConfig = {
     // FFT spectrum
     waveHeight: 2.4,        // RMS surface height in metres (master wave-height gain)
     chopAmount: 1.0,        // High-frequency normal detail injected in the fragment shader
+    detailPatchiness: 0.7,  // Wind-lane modulation of the detail ripples (0 = uniform carpet)
+    swellDirSpread: 6.0,    // Directional spread exponent at the spectral peak; higher = longer crests
+    rippleSuppress: 0.8,    // Metre-scale spectrum cutoff; drains uniform micro-chop from the normals
     fftPatchSize: 420.0,    // Physical side of the periodic FFT tile (m); longest wave it can hold
     fftResolution: 256,     // FFT grid is fftResolution^2 (power of two; refresh to apply)
 
