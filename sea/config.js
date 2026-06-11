@@ -4,7 +4,7 @@
  * Uses Proxy-based reactive state management.
  * All modules read from this single source of truth.
  *
- * Version: 0.5.0
+ * Version: 0.6.0
  */
 
 import * as THREE from 'three';
@@ -15,19 +15,17 @@ const defaultConfig = {
     seaLevel: 0.0,
     seabedLevel: -200.0,
     
-    // Wave physics (Stacked Gerstner Wave parameters)
+    // Wave physics (FFT spectral ocean parameters)
     windDirection: 15.0, // Degrees (0-360)
-    windSpeed: 22.0,
-    choppiness: 2, // Range: 0.8 - 1.5
+    windSpeed: 22.0,     // Drives the Phillips spectrum shape (peak wavelength)
+    choppiness: 1.2,     // Horizontal displacement scale; >~1.5 over-folds the crests
     timeScale: 0.75,
-    
-    // Wave spectrum (three explicit bands: macro swell / wind sea / chop)
-    swellWavelength: 320.0, // Base wavelength of the longest swell layer (m)
-    swellAmount: 1.0,       // Macro swell steepness scale
-    windSeaAmount: 1.0,     // Mid-frequency wind sea steepness scale
-    chopAmount: 1.0,        // High-frequency chop scale (geometry + normal detail)
-    crestSkew: 0.55,        // Forward lean of crests along travel direction (0 = symmetric)
-    detailFadeStart: 0.18,  // Fraction of grid size where high-frequency bands start fading
+
+    // FFT spectrum
+    waveHeight: 2.4,        // RMS surface height in metres (master wave-height gain)
+    chopAmount: 1.0,        // High-frequency normal detail injected in the fragment shader
+    fftPatchSize: 420.0,    // Physical side of the periodic FFT tile (m); longest wave it can hold
+    fftResolution: 256,     // FFT grid is fftResolution^2 (power of two; refresh to apply)
 
     // Foam physics
     foamDecay: 0.96,

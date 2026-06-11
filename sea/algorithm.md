@@ -6,6 +6,9 @@
 
 ## 1. 核心波形算法：绝对尖峰 Gerstner 波
 
+> 注：自 M4 起，现行 L0 深海高度场已改用 FFT 频谱海洋（见 §15）。本节及 §2、§12 描述的
+> 尖峰 Gerstner 叠加作为历史参考保留，可独立用于不需要 FFT 的轻量场景。
+
 传统 Gerstner 波使用正弦函数产生平滑波形，本算法通过 **绝对值变换** 产生数学意义上的尖锐波峰。
 
 ### 1.1 数学原理
@@ -764,6 +767,95 @@ bool spawn(seed, out pos, out vel, out life) {
 Points 顶点按 `aRef`（每粒子的纹理 texel 坐标）采 position 纹理取世界位，
 死粒子停泊到裁剪域外。`gl_PointSize` 按距离与寿命缩放，alpha 出生淡入、死亡淡出，
 AdditiveBlending + 软圆点。
+
+---
+
+## 15. FFT 频谱海洋（M4，现行 L0）
+
+> M4 起 L0 深海高度场由 Tessendorf FFT 频谱海洋生成（`sea/fft.js`），**取代**第 1、2、12 节
+> 描述的尖峰 Gerstner 叠加。下游接口不变：仍产出一张跟随相机的位移纹理
+> `(RGB = 世界位移 Dx/高度/Dz, A = Jacobian)`，故 L2/L3、海面网格、泡沫 pass 全部无感知。
+> 第 1、2、12 节作为历史参考保留。
+
+### 15.1 频域种子 h0(k)
+
+Phillips 谱 × 高斯随机，每个 texel 一次（仅风/波高参数变化时重建）：
+
+```
+P(k) = A · exp(-1/(k·L)²) / k⁴ · |k̂·ŵ|²            L = V²/g（风浪尺度）
+       · exp(-k² · (L·0.001)²)                       抑制次网格涟漪
+       · (k̂·ŵ < 0 ? 0.07 : 1)                        压制逆风波
+h0(k) = (1/√2)(ξ_r + iξ_i)·√P(k)                     ξ ~ N(0,1)，Box-Muller
+```
+
+频率布局：texel `m∈[0,N)` 对应波数 `n = m − N/2`，`k = 2π·n / patchSize`。
+A 为内部常数（取 1），在 §15.4 的 RMS 归一里约掉，故其绝对值无关紧要。
+
+### 15.2 时间演化与位移谱
+
+色散 `ω(k)=√(g|k|)`（深水）。每帧把 h0 推到当前时刻并组出三路位移谱：
+
+```
+h̃(k,t) = h0(k)·e^{iωt} + conj(h0(−k))·e^{−iωt}       高度谱（厄米→实场）
+D̃x = −i (k̂.x) h̃ ,  D̃z = −i (k̂.y) h̃                  水平 choppy 位移谱
+```
+
+`h0(−k)` 由镜像 texel `(N−m) mod N` 取得。三路谱各自厄米，故逆变换得实场。
+**打包**：一次复数 iFFT 出两路实场——`C_A = D̃x + i·D̃z`（实部→Dx，虚部→Dz），
+`C_B = h̃`（实部→高度）。RGBA 一张图同时承载 `RG = C_A`、`BA = C_B`，butterfly 一并变换。
+
+### 15.3 Butterfly-texture iFFT
+
+预计算一张 `stages × N` 的 butterfly 查找纹理（FloatType），每个 `(stage, index)` 存
+`(twiddle.re, twiddle.im, topIndex, bottomIndex)`，stage 0 折入 bit-reversal。
+twiddle 取正号 `e^{+i2πk/N}` 即合成逆变换。每个 pass：
+
+```glsl
+bf = texelFetch(butterfly, ivec2(stage, dir==0 ? px.x : px.y), 0);
+a = texelFetch(input, dir==0 ? ivec2(bf.z, px.y) : ivec2(px.x, bf.z), 0);
+b = texelFetch(input, dir==0 ? ivec2(bf.w, px.y) : ivec2(px.x, bf.w), 0);
+fieldA = a.rg + cmul(bf.xy, b.rg);   // 两路复数同时蝶形
+fieldB = a.ba + cmul(bf.xy, b.ba);
+```
+
+先 `log2(N)` 个水平 pass 再 `log2(N)` 个垂直 pass，在两张 RGBA 半浮点纹理间乒乓。
+
+### 15.4 解析（resolve）与 RMS 归一
+
+butterfly 算的是**未归一**的逆和 `Σ_k X_k e^{+i2π(k·x)/N}`；中心化谱（DC 在 N/2）需补
+符号 `(−1)^(px+py)`，**不做 1/N² 除法**（Tessendorf 约定振幅全在谱里）：
+
+```
+spatial(px) = (−1)^(px.x+px.y) · texelFetch(input, px).rgb     // (Dx, Dz, height)
+```
+
+由 Parseval，逆和场的 RMS ≈ `√(Σ|h̃|²)`，时间平均 `Σ|h̃|² ≈ ΣP(k)`。故在 CPU 上一次性
+积分 `rms = √(Σ P(k))`（与 shader 同式），令 `heightScale = waveHeight / rms`，
+则输出高度 RMS ≈ `waveHeight` 米——**与风速/patch/A 无关的可预测物理增益**。
+Jacobian 由相邻 texel 的 choppy 位移差分得（tile 周期、可环绕取样）：
+
+```
+J = (1 + ∂Dx/∂x)(1 + ∂Dz/∂z) − (∂Dx/∂z)(∂Dz/∂x)        J<1 折叠→泡沫
+```
+
+输出 tile `(Dx·hc, height·hs, Dz·hc, J)`，`hs=heightScale`、`hc=hs·choppiness`。
+
+### 15.5 平铺进相机 patch（保接口）
+
+FFT tile 是物理边长 `patchSize` 的**周期**图。再一个 pass 按世界位置平铺，写进与旧 Gerstner
+完全同格式的相机中心位移纹理：`worldPos=(uv−0.5)·gridSize+gridOffset`，
+采 `tile[fract(worldPos/patchSize)]`（Repeat+Linear）。下游照旧按
+`uv=(wp−gridOffset)/gridSize+0.5` 取样，毫无感知。远场裙边直接按世界位置采同一张 tile，
+故与主网格在接缝处天然吻合（无需旧版的短波边缘淡出）。
+
+### 15.6 工程注意
+
+- 全部 pass 用 `RawShaderMaterial` + `GLSL3` 全屏квад，半浮点 RT（与 GPGPU 一致，免扩展），
+  butterfly 查找纹理用 FloatType 保证索引精确。
+- `patchSize` 决定能承载的最长波——单级 FFT 是周期的，过小会暴露重复；过大则高频在固定 N 下变粗。
+  单级是 M4 的折中，多级 cascade（不同尺度叠加）留作后续。
+- 仅风速/风向/波高/choppiness 变化才重建 h0；h0 由 `hash(texel)` 确定性生成，
+  改波高/choppiness 不会让相位跳变（只缩放），改风速/风向才换海况。
 
 ---
 

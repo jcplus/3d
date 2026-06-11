@@ -7,7 +7,7 @@
  * persisted to localStorage; "Refresh" reloads to apply grid-level changes,
  * "Reset" clears saved values and restores defaults.
  *
- * Version: 0.5.0
+ * Version: 0.6.0
  */
 
 import { config, saveConfigToStorage, clearSavedConfig } from './config.js';
@@ -32,22 +32,18 @@ export class UI {
                     title: 'Wave Physics',
                     target: config,
                     params: [
-                        { key: 'windSpeed', label: 'Wind Speed', type: 'number', min: 1, max: 50, step: 0.5, description: 'Drives wavelength, storm intensity and peak sharpening' },
+                        { key: 'windSpeed', label: 'Wind Speed', type: 'number', min: 1, max: 50, step: 0.5, description: 'Drives the Phillips spectrum shape and peak wavelength' },
                         { key: 'windDirection', label: 'Wind Direction', type: 'number', min: 0, max: 360, step: 1, description: 'Main wave travel direction in degrees' },
-                        { key: 'choppiness', label: 'Choppiness', type: 'number', min: 0, max: 3, step: 0.05, description: 'Wave steepness multiplier; higher = sharper crests' },
+                        { key: 'choppiness', label: 'Choppiness', type: 'number', min: 0, max: 3, step: 0.05, description: 'Horizontal displacement scale; higher = sharper crests, over-folds past ~1.5' },
                         { key: 'timeScale', label: 'Time Scale', type: 'number', min: 0, max: 3, step: 0.05, description: 'Simulation speed; 0 freezes the ocean' },
                     ],
                 },
                 {
-                    title: 'Spectrum',
+                    title: 'Spectrum (FFT)',
                     target: config,
                     params: [
-                        { key: 'swellWavelength', label: 'Swell Length', type: 'number', min: 100, max: 600, step: 10, description: 'Base wavelength of the macro swell band in meters' },
-                        { key: 'swellAmount', label: 'Swell Amount', type: 'number', min: 0, max: 2, step: 0.05, description: 'Macro swell steepness scale; sets the long-wave rhythm' },
-                        { key: 'windSeaAmount', label: 'Wind Sea', type: 'number', min: 0, max: 2, step: 0.05, description: 'Mid-frequency wind sea steepness scale' },
-                        { key: 'chopAmount', label: 'Chop', type: 'number', min: 0, max: 2, step: 0.05, description: 'High-frequency chop: small geometry share plus fragment normal detail' },
-                        { key: 'crestSkew', label: 'Crest Skew', type: 'number', min: 0, max: 1, step: 0.05, description: 'Forward lean of crests along the travel direction' },
-                        { key: 'detailFadeStart', label: 'Detail Fade', type: 'number', min: 0.05, max: 0.45, step: 0.01, description: 'Fraction of grid size where short waves start fading into the distance' },
+                        { key: 'waveHeight', label: 'Wave Height', type: 'number', min: 0, max: 8, step: 0.1, description: 'RMS surface height in metres; the master wave-height gain' },
+                        { key: 'chopAmount', label: 'Detail', type: 'number', min: 0, max: 2, step: 0.05, description: 'High-frequency normal detail injected in the fragment shader' },
                     ],
                 },
                 {
@@ -123,7 +119,9 @@ export class UI {
                     target: config,
                     params: [
                         { key: 'gridSize', label: 'Grid Size', type: 'number', min: 250, max: 4000, step: 50, description: 'World size of the ocean patch in meters; applied after Refresh' },
-                        { key: 'gridResolution', label: 'Resolution', type: 'number', min: 64, max: 1024, step: 64, description: 'GPGPU texture and mesh resolution; applied after Refresh' },
+                        { key: 'gridResolution', label: 'Resolution', type: 'number', min: 64, max: 1024, step: 64, description: 'Displacement texture and mesh resolution; applied after Refresh' },
+                        { key: 'fftResolution', label: 'FFT Size', type: 'number', min: 64, max: 512, step: 64, description: 'FFT grid is this value squared (power of two); applied after Refresh' },
+                        { key: 'fftPatchSize', label: 'FFT Patch', type: 'number', min: 100, max: 1200, step: 20, description: 'Physical side of the periodic FFT tile in metres; applied after Refresh' },
                         { key: 'sweResolution', label: 'SWE Resolution', type: 'number', min: 64, max: 512, step: 64, description: 'Near-shore shallow-water grid resolution; applied after Refresh' },
                         { key: 'sprayPoolRes', label: 'Spray Pool', type: 'number', min: 32, max: 256, step: 32, description: 'Spray particle pool is this value squared; applied after Refresh' },
                     ],
@@ -133,22 +131,22 @@ export class UI {
                     target: {},
                     params: [
                         { key: 'calm', label: 'Calm Seas', type: 'button', onClick: () => this.applyPreset({
-                            windSpeed: 6, choppiness: 1.0, swellAmount: 0.8, crestSkew: 0.3,
+                            windSpeed: 6, choppiness: 0.9, waveHeight: 0.8,
                             foamThreshold: 0.85, fogDensity: 0.0008,
                             waterColorDeep: 0x0d5a66, waterColorShallow: 0x49b8b4,
                             skyColorHorizon: 0xd6e6ec, skyColorZenith: 0x7db4d8,
                             sssStrength: 1.8, glitterStrength: 0.8,
                         }) },
                         { key: 'sunny', label: 'Sunny Swell', type: 'button', onClick: () => this.applyPreset({
-                            windSpeed: 16, choppiness: 1.6, swellAmount: 1.1, windSeaAmount: 1.0,
-                            crestSkew: 0.55, foamThreshold: 0.75, foamDecay: 0.965, fogDensity: 0.0011,
+                            windSpeed: 16, choppiness: 1.2, waveHeight: 2.0,
+                            foamThreshold: 0.75, foamDecay: 0.965, fogDensity: 0.0011,
                             waterColorDeep: 0x0d4d5e, waterColorShallow: 0x3fa8b0,
                             skyColorHorizon: 0xcfe3ea, skyColorZenith: 0x6fa8d4,
                             sssColor: 0x1ba692, sssStrength: 2.0, specPower: 36, glitterStrength: 0.7,
                         }) },
                         { key: 'overcast', label: 'Overcast Storm', type: 'button', onClick: () => this.applyPreset({
-                            windSpeed: 30, choppiness: 2.2, swellAmount: 1.3, windSeaAmount: 1.3,
-                            crestSkew: 0.7, foamThreshold: 0.6, foamDecay: 0.975, fogDensity: 0.0018,
+                            windSpeed: 30, choppiness: 1.5, waveHeight: 4.2,
+                            foamThreshold: 0.6, foamDecay: 0.975, fogDensity: 0.0018,
                             waterColorDeep: 0x24343a, waterColorShallow: 0x5d7a76,
                             skyColorHorizon: 0xb9bdbd, skyColorZenith: 0x73797c,
                             sssColor: 0x4a7a6a, sssStrength: 0.8, specPower: 24, specIntensity: 0.3,
@@ -156,10 +154,9 @@ export class UI {
                         }) },
                         { key: 'randomize', label: 'Randomize', type: 'button', onClick: () => this.applyPreset({
                             windSpeed: 5 + Math.random() * 30,
-                            choppiness: 0.5 + Math.random() * 2,
+                            choppiness: 0.6 + Math.random() * 1.0,
                             windDirection: Math.random() * 360,
-                            swellAmount: 0.6 + Math.random() * 0.9,
-                            crestSkew: Math.random() * 0.8,
+                            waveHeight: 0.6 + Math.random() * 3.5,
                             foamThreshold: 0.5 + Math.random() * 0.4,
                         }) },
                     ],
