@@ -22,7 +22,12 @@
  * lives in spray.js; it samples this frame's L0 displacement to throw spray off
  * the reefs and stamps its foam splats into the same foam target.
  *
- * Version: 0.6.0
+ * Foam is advected: the displacement texture is double-buffered so the foam
+ * pass can difference two frames into a horizontal surface velocity and drag
+ * the accumulated foam along it. Convergent chop then gathers the foam into
+ * the streaky downwind webbing of a worked sea instead of static blooms.
+ *
+ * Version: 0.7.0
  */
 
 import * as THREE from 'three';
@@ -52,7 +57,9 @@ export class Ocean {
             size: config.fftResolution,
             patchSize: config.fftPatchSize,
         });
-        this.physicsTarget = new THREE.WebGLRenderTarget(config.gridResolution, config.gridResolution, {
+        // Double-buffered so the foam pass can difference two consecutive
+        // frames into a horizontal surface velocity for foam advection
+        const makePhysicsTarget = () => new THREE.WebGLRenderTarget(config.gridResolution, config.gridResolution, {
             type: THREE.HalfFloatType,
             format: THREE.RGBAFormat,
             minFilter: THREE.LinearFilter,
@@ -60,6 +67,8 @@ export class Ocean {
             depthBuffer: false,
             stencilBuffer: false,
         });
+        this.physicsTargets = [makePhysicsTarget(), makePhysicsTarget()];
+        this.physicsIndex = 0;
         this.updateSpectrum(true);
 
         this.initGPGPU();
@@ -123,7 +132,10 @@ export class Ocean {
         // === Foam Uniforms ===
         const foamUniforms = this.foamVariable.material.uniforms;
         foamUniforms['uTime'] = this.timeUniform;
-        foamUniforms['uPhysics'] = { value: this.physicsTarget.texture };
+        foamUniforms['uPhysics'] = { value: null };
+        foamUniforms['uPhysicsPrev'] = { value: null };
+        foamUniforms['uDt'] = { value: 0 };
+        foamUniforms['uStreak'] = { value: config.foamStreak };
         foamUniforms['uDecay'] = { value: config.foamDecay };
         foamUniforms['uThreshold'] = { value: config.foamThreshold };
         foamUniforms['uGrowth'] = { value: config.foamGrowth };
@@ -144,6 +156,9 @@ export class Ocean {
     getFoamAccumulateShader() {
         return `
             uniform sampler2D uPhysics;
+            uniform sampler2D uPhysicsPrev;
+            uniform float uDt;
+            uniform float uStreak;
             uniform float uDecay;
             uniform float uThreshold;
             uniform float uGrowth;
@@ -164,20 +179,34 @@ export class Ocean {
                 vec4 physics = texture2D(uPhysics, uv);
                 float jacobian = physics.a;
 
-                // 2. Read previous frame foam, reprojected by the grid movement
-                // so accumulated foam stays pinned to world positions.
-                // Areas newly scrolled into view have no history and start at zero.
-                vec2 prevUv = uv + uUVOffset;
+                // 2. Horizontal surface velocity from the frame-to-frame choppy
+                // displacement delta (the previous frame lives at uv + uUVOffset
+                // because the grid may have snapped between frames)
+                vec2 selfPrev = uv + uUVOffset;
+                vec2 vel = vec2(0.0);
+                if (uDt > 1e-4 && selfPrev.x >= 0.0 && selfPrev.x <= 1.0
+                    && selfPrev.y >= 0.0 && selfPrev.y <= 1.0) {
+                    vec2 dispPrev = texture2D(uPhysicsPrev, selfPrev).xz;
+                    vel = (physics.xz - dispPrev) / uDt;
+                }
+
+                // 3. Read previous frame foam, reprojected by the grid movement
+                // and advected upstream along the surface velocity. Convergent
+                // chop gathers the foam into downwind streaks; areas newly
+                // scrolled into view have no history and start at zero.
+                vec2 prevUv = uv - vel * uDt * uStreak / uGridSize + uUVOffset;
                 float prevFoam = 0.0;
                 if (prevUv.x >= 0.0 && prevUv.x <= 1.0 && prevUv.y >= 0.0 && prevUv.y <= 1.0) {
                     prevFoam = texture2D(textureFoam, prevUv).r;
                 }
 
-                // 3. Generate from the open-ocean crest compression
-                float generation = smoothstep(uThreshold, uThreshold - 0.2, jacobian);
-                generation = clamp(generation, 0.0, 1.0) * 0.075 * uGrowth;
+                // 4. Generate from the open-ocean crest compression: a soft
+                // onset over the whole folding range plus a hard kick where the
+                // surface truly overturns, so whitecaps read as events
+                float fold = smoothstep(uThreshold, uThreshold - 0.35, jacobian);
+                float generation = (fold * 0.05 + fold * fold * 0.07) * uGrowth;
 
-                // 4. Near-shore foam: breakers (fast + shallow) and the wet/dry
+                // 5. Near-shore foam: breakers (fast + shallow) and the wet/dry
                 // swash line, sampled from the SWE state at this world position
                 if (uSweEnabled > 0.5) {
                     vec2 worldPos = (uv - 0.5) * uGridSize + uGridOffset;
@@ -239,6 +268,9 @@ export class Ocean {
                 uSpecIntensity: { value: config.specIntensity },
                 uGlitterStrength: { value: config.glitterStrength },
                 uLacingScale: { value: config.foamLacingScale },
+                uFoamCoverage: { value: config.foamCoverage },
+                uWaterContrast: { value: config.waterContrast },
+                uWindDir: { value: getters.windVector },
                 uSkyHorizon: { value: getters.skyHorizonColor },
                 uSkyZenith: { value: getters.skyZenithColor },
                 uFogDensity: { value: config.fogDensity },
@@ -307,6 +339,8 @@ export class Ocean {
                 uSkyZenith: { value: getters.skyZenithColor },
                 uFogDensity: { value: config.fogDensity },
                 uAmpNorm: { value: this.ampNorm },
+                uFoamThreshold: { value: config.foamThreshold },
+                uWindDir: { value: getters.windVector },
             },
         });
 
@@ -354,6 +388,8 @@ export class Ocean {
 
     getSkirtFragmentShader() {
         return `
+            uniform sampler2D uTile;
+            uniform float uPatch;
             uniform vec3 uWaterColorDeep;
             uniform vec3 uWaterColorShallow;
             uniform vec3 uSunPosition;
@@ -366,10 +402,29 @@ export class Ocean {
             uniform vec3 uSkyZenith;
             uniform float uFogDensity;
             uniform float uAmpNorm;
+            uniform float uFoamThreshold;
+            uniform vec2 uWindDir;
 
             varying vec3 vWorldPosition;
             varying vec3 vNormal;
             varying float vDisplacement;
+
+            // Cheap value noise; only shapes the far-field foam veining
+            float hash21(vec2 p) {
+                p = fract(p * vec2(234.34, 435.345));
+                p += dot(p, p + 34.23);
+                return fract(p.x * p.y);
+            }
+            float vnoise(vec2 p) {
+                vec2 i = floor(p);
+                vec2 f = fract(p);
+                f = f * f * (3.0 - 2.0 * f);
+                float a = hash21(i);
+                float b = hash21(i + vec2(1.0, 0.0));
+                float c = hash21(i + vec2(0.0, 1.0));
+                float d = hash21(i + vec2(1.0, 1.0));
+                return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+            }
 
             void main() {
                 vec3 viewDir = normalize(uCameraPosition - vWorldPosition);
@@ -399,6 +454,25 @@ export class Ocean {
                 finalColor += spec * vec3(1.0, 0.98, 0.9);
 
                 float dist = length(vWorldPosition - uCameraPosition);
+
+                // Far-field whitecaps: the periodic tile carries the Jacobian in
+                // alpha, so folding crests keep flecking the sea out to the fog
+                // line. A wind-stretched vein field breaks them into streaks and
+                // a very low-frequency mask hides the tile repetition.
+                float jac = texture2D(uTile, vWorldPosition.xz / uPatch).a;
+                vec2 wDir = normalize(uWindDir);
+                vec2 wuv = vec2(dot(vWorldPosition.xz, wDir) * 0.35,
+                                dot(vWorldPosition.xz, vec2(-wDir.y, wDir.x)));
+                float vein = vnoise(wuv * 0.06);
+                float patchMask = vnoise(vWorldPosition.xz * 0.0035);
+                float cap = smoothstep(uFoamThreshold, uFoamThreshold - 0.45, jac);
+                float caps = cap * (0.4 + 0.6 * vein) * (0.45 + 0.75 * patchMask);
+                // Unfiltered tile texels alias at extreme range; let the fog own it
+                caps *= exp(-dist * 0.0008);
+                float lam = max(dot(normal, sunDir), 0.0);
+                vec3 foamColor = vec3(0.93, 0.96, 0.97) * (0.55 + 0.45 * lam);
+                finalColor = mix(finalColor, foamColor, clamp(caps * 1.6, 0.0, 1.0));
+
                 float fogAmt = 1.0 - exp(-dist * uFogDensity);
                 finalColor = mix(finalColor, uSkyHorizon, fogAmt);
 
@@ -420,12 +494,18 @@ export class Ocean {
         const offsetZ = Math.floor(camera.position.z / patch) * patch;
 
         // Evolve the FFT field and tile it into the camera-centred displacement
-        // texture the rest of the pipeline samples
+        // texture the rest of the pipeline samples. The two targets alternate
+        // so the foam pass can difference them into a surface velocity.
+        this.physicsIndex ^= 1;
         this.fft.update(config.time);
-        this.fft.resolveToPatch(this.physicsTarget, new THREE.Vector2(offsetX, offsetZ), this.gridSize);
-        const physicsTexture = this.physicsTarget.texture;
+        this.fft.resolveToPatch(this.physicsTargets[this.physicsIndex], new THREE.Vector2(offsetX, offsetZ), this.gridSize);
+        const physicsTexture = this.physicsTargets[this.physicsIndex].texture;
 
         if (this.foamUniforms) {
+            this.foamUniforms.uPhysics.value = physicsTexture;
+            this.foamUniforms.uPhysicsPrev.value = this.physicsTargets[this.physicsIndex ^ 1].texture;
+            this.foamUniforms.uDt.value = Math.min(config.deltaTime, 0.05) * config.timeScale;
+            this.foamUniforms.uStreak.value = config.foamStreak;
             this.foamUniforms.uDecay.value = config.foamDecay;
             this.foamUniforms.uThreshold.value = config.foamThreshold;
             this.foamUniforms.uGrowth.value = config.foamGrowth;
@@ -477,6 +557,9 @@ export class Ocean {
             u.uSpecIntensity.value = config.specIntensity;
             u.uGlitterStrength.value = config.glitterStrength;
             u.uLacingScale.value = config.foamLacingScale;
+            u.uFoamCoverage.value = config.foamCoverage;
+            u.uWaterContrast.value = config.waterContrast;
+            u.uWindDir.value.copy(getters.windVector);
             u.uSkyHorizon.value.setHex(config.skyColorHorizon);
             u.uSkyZenith.value.setHex(config.skyColorZenith);
             u.uFogDensity.value = config.fogDensity;
@@ -502,6 +585,8 @@ export class Ocean {
             s.uSkyZenith.value.setHex(config.skyColorZenith);
             s.uFogDensity.value = config.fogDensity;
             s.uAmpNorm.value = this.ampNorm;
+            s.uFoamThreshold.value = config.foamThreshold;
+            s.uWindDir.value.copy(getters.windVector);
         }
 
         // Advance the wave-strike spray pool and splat its foam into the shared
@@ -519,6 +604,6 @@ export class Ocean {
         if (this.spray) this.spray.dispose();
         if (this.swe) this.swe.dispose();
         if (this.fft) this.fft.dispose();
-        if (this.physicsTarget) this.physicsTarget.dispose();
+        if (this.physicsTargets) this.physicsTargets.forEach(t => t.dispose());
     }
 }

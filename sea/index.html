@@ -167,6 +167,9 @@
         uniform float uSpecIntensity;
         uniform float uGlitterStrength;
         uniform float uLacingScale;
+        uniform float uFoamCoverage;
+        uniform float uWaterContrast;
+        uniform vec2 uWindDir;
         uniform vec3 uSkyHorizon;
         uniform vec3 uSkyZenith;
         uniform float uFogDensity;
@@ -247,12 +250,16 @@
             float rampT = clamp(smoothstep(0.15, 0.95, hT) * 0.75 + grazing * 0.25, 0.0, 1.0);
             vec3 waterColor = mix(uWaterColorDeep, uWaterColorShallow, rampT);
 
+            // Diffuse modelling: faces turned from the sun fall into shadow, so
+            // each swell reads as a lit flank and a dark flank
+            float lambert = max(dot(normal, sunDir), 0.0);
+            waterColor *= mix(1.0, 0.45 + 0.65 * lambert, uWaterContrast);
+
             // === Directional translucency (hero effect) ===
             // Backlit crests are thin: light from behind transmits through,
             // strongest on the shadowed side of tall waves
             float backlight = max(dot(viewDir, -sunDir), 0.0);
             float thinness = clamp(max(vDisplacement, 0.0) / uAmpNorm, 0.0, 1.5);
-            float lambert = max(dot(normal, sunDir), 0.0);
             float sss = pow(backlight, 2.5) * thinness * (0.35 + 0.65 * (1.0 - lambert));
             waterColor += uSssColor * sss * uSssStrength;
 
