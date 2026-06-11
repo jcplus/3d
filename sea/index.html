@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="version" content="0.4.7">
+    <meta name="version" content="0.4.8">
     <title>Real-Time Ocean Simulation</title>
     <style>
         * {
@@ -285,27 +285,30 @@
             float hiBand = smoothstep(0.86, 0.9, pow(specAngle, max(uSpecPower * 0.2, 1.0)));
 
             // === Foam: sparse crisp crest crescents (hard edges) ===
-            // The accumulated foam texture saturates over broad areas, so it is
-            // NOT used as the primary white. Instead the live crest-fold signal
-            // (1 - Jacobian) drives the foam: it is naturally thin and tracks
-            // only the crests that are currently overturning.
+            // The choppy-displacement sign is now correct, so the Jacobian folds
+            // on the crests: (1 - Jacobian) peaks exactly where whitecaps belong.
+            // The panel Threshold drives both generation (sea.js) and the display
+            // cut below, so it reads as one coherent coverage knob.
             float foamAcc = texture2D(uFoamTexture, vUv).r;
             float jacobian = texture2D(uDisplacementMap, vUv).a;
             float crestNow = clamp(1.0 - jacobian, 0.0, 1.5);
 
-            // Torn-edge noise (0..1) modulates the cutoff so the white reads as
-            // hand-painted, breaking long crest lines into discrete crescents.
+            // Torn-edge noise (0..1) jitters the cut so the white edge breaks
+            // into hand-painted chunks rather than a clean contour.
             float edgeNoise = snoise(vWorldPosition.xz * 0.6 + uTime * 0.12) * 0.5 + 0.5;
             float edgeNoise2 = snoise(vWorldPosition.xz * 1.9 - uTime * 0.2) * 0.5 + 0.5;
             float tear = mix(edgeNoise, edgeNoise2, 0.4);
+            // Display cut moves the SAME direction as generation: a higher panel
+            // Threshold lowers the cut, so more crest fold shows as foam. The
+            // tear noise jitters it for a hand-drawn edge.
+            float crestCut = (0.95 - 0.6 * uFoamThreshold) + (tear - 0.5) * 0.2;
+            float accCut = 0.9 - 0.45 * uFoamThreshold;
 
-            // Crest whitecap: only strong live folds turn white, then the tear
-            // noise carves the lip into broken painterly chunks.
-            float whitecap = smoothstep(0.62, 0.82, crestNow * (0.45 + 1.1 * tear));
-
-            // Short downwind streak: accumulated foam, kept tight (high cutoff)
-            // and broken by the tear so it trails the crest without blanketing.
-            float trailing = smoothstep(0.86, 0.98, foamAcc) * smoothstep(0.45, 0.8, tear);
+            // Crest lip: instantaneous fold above the cut — the crisp crescent.
+            float whitecap = smoothstep(crestCut, crestCut + 0.1, crestNow);
+            // Trailing streak: advected accumulation behind the crest, broken by
+            // the tear so it trails rather than blankets.
+            float trailing = smoothstep(accCut, accCut + 0.15, foamAcc) * smoothstep(0.45, 0.8, tear);
 
             // Near-shore breakers: fast, shallow shallow-water flow turns white.
             float shoreFoam = smoothstep(0.8, 1.0, vSweSpeed) * vSweMask;

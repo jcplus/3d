@@ -50,7 +50,7 @@ export class UI {
                     title: 'Foam',
                     target: config,
                     params: [
-                        { key: 'foamThreshold', label: 'Threshold', type: 'number', min: 0, max: 1, step: 0.01, description: 'Jacobian threshold for foam generation; higher = more foam' },
+                        { key: 'foamThreshold', label: 'Coverage', type: 'number', min: 0, max: 1, step: 0.01, description: 'Foam coverage; drives both crest generation and the display cut, higher = more foam' },
                         { key: 'foamDecay', label: 'Decay', type: 'number', min: 0.8, max: 0.999, step: 0.001, description: 'Per-frame foam persistence; closer to 1 = longer-lived foam' },
                         { key: 'foamGrowth', label: 'Growth', type: 'number', min: 0.2, max: 6, step: 0.1, description: 'Foam accumulation rate at the crests' },
                         { key: 'foamLacingScale', label: 'Lacing Scale', type: 'number', min: 0.01, max: 0.2, step: 0.005, description: 'World-space frequency of the residual foam lacing pattern' },
