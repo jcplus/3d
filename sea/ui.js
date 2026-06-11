@@ -35,6 +35,7 @@ export class UI {
                         { key: 'windSpeed', label: 'Wind Speed', type: 'number', min: 1, max: 50, step: 0.5, description: 'Drives the Phillips spectrum shape and peak wavelength' },
                         { key: 'windDirection', label: 'Wind Direction', type: 'number', min: 0, max: 360, step: 1, description: 'Main wave travel direction in degrees' },
                         { key: 'choppiness', label: 'Choppiness', type: 'number', min: 0, max: 3, step: 0.05, description: 'Horizontal displacement scale; higher = sharper crests, over-folds past ~2.0' },
+                        { key: 'crestLean', label: 'Crest Lean', type: 'number', min: 0, max: 1.5, step: 0.05, description: 'Stylised forward-lean: pitches crests downwind for a steep front face' },
                         { key: 'timeScale', label: 'Time Scale', type: 'number', min: 0, max: 3, step: 0.05, description: 'Simulation speed; 0 freezes the ocean' },
                     ],
                 },

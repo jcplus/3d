@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="version" content="0.4.8">
+    <meta name="version" content="0.4.9">
     <title>Real-Time Ocean Simulation</title>
     <style>
         * {
@@ -74,6 +74,8 @@
         uniform float uTime;
         uniform float uGridSize;
         uniform float uGridResolution;
+        uniform vec2 uWindDir;
+        uniform float uCrestLean;
 
         // Near-shore shallow water (L2) blended over the open-ocean field
         uniform sampler2D uSweTexture;   // (depth, vx, vz, surfaceY)
@@ -99,13 +101,24 @@
             vec4 data = texture2D(uDisplacementMap, uv);
             vec3 displacement = data.rgb;
 
-            // Displacement from sea.js is already the final world offset
-            vec3 newPosition = position + displacement;
-
             // === Open-ocean normal from the displacement field ===
             float texelSize = 1.0 / uGridResolution;
             vec3 pRight = texture2D(uDisplacementMap, uv + vec2(texelSize, 0.0)).rgb;
             vec3 pDown  = texture2D(uDisplacementMap, uv + vec2(0.0, texelSize)).rgb;
+
+            // Stylised forward-lean (applied on the corrected geometry): linear
+            // FFT crests are fore-aft symmetric, but illustrated breakers pitch
+            // downwind — long gentle back, steep front. Shift the surface along
+            // the wind by an amount proportional to crest height. The neighbour
+            // samples get the same shift so the reconstructed normal follows it.
+            vec3 leanDir = vec3(normalize(uWindDir).x, 0.0, normalize(uWindDir).y) * uCrestLean;
+            displacement += leanDir * max(displacement.y, 0.0);
+            pRight       += leanDir * max(pRight.y, 0.0);
+            pDown        += leanDir * max(pDown.y, 0.0);
+
+            // Displacement from sea.js is already the final world offset
+            vec3 newPosition = position + displacement;
+
             float gridStep = uGridSize / uGridResolution;
             vec3 vRight = vec3(gridStep, 0.0, 0.0) + (pRight - displacement);
             vec3 vDown  = vec3(0.0, 0.0, gridStep) + (pDown - displacement);
@@ -264,12 +277,20 @@
             // value steps rather than near-identical teals.
             waterColor *= mix(0.62, 1.12, rampT);
 
-            // Two-tone diffuse: a hard sun/shade split gives every wave a flat
-            // lit flank and a flat shadow flank (cel shading).
+            // Three-tone diffuse: two hard sun/shade splits give every wave a
+            // flat lit flank, a mid flank and a flat shadow flank (cel shading).
             float lambert = max(dot(normal, sunDir), 0.0);
             float litBand = smoothstep(0.42, 0.5, lambert);
-            float toonShade = mix(1.0 - 0.35 * uWaterContrast, 1.0, litBand);
+            float midBand = smoothstep(0.2, 0.28, lambert);
+            float toonShade = mix(1.0 - 0.4 * uWaterContrast,
+                                  mix(1.0 - 0.18 * uWaterContrast, 1.0, litBand), midBand);
             waterColor *= toonShade;
+
+            // Watercolour mottle: a slow world-space wash that nudges value up
+            // and down, so the flat bands read as painted rather than plastic.
+            float mottle = snoise(vWorldPosition.xz * 0.035) * 0.5
+                         + snoise(vWorldPosition.xz * 0.11 + 7.0) * 0.25;
+            waterColor *= 1.0 + mottle * 0.12;
 
             // === Painted backlight band (flat, replaces physical SSS) ===
             // Tall backlit crests get a single flat translucent-green band
