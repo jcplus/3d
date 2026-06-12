@@ -4,7 +4,7 @@
  * Uses Proxy-based reactive state management.
  * All modules read from this single source of truth.
  *
- * Version: 0.8.0
+ * Version: 0.8.1
  */
 
 import * as THREE from 'three';
@@ -81,8 +81,8 @@ const defaultConfig = {
     sunPosition: { x: 100, y: 200, z: 100 },
     
     // Grid settings
-    gridSize: 1000,
-    gridResolution: 512,
+    gridSize: 1500,
+    gridResolution: 768,
     
     // Camera settings
     cameraStartHeight: 100,
