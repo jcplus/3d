@@ -4,7 +4,7 @@
  * Uses Proxy-based reactive state management.
  * All modules read from this single source of truth.
  *
- * Version: 0.8.1
+ * Version: 0.10.0
  */
 
 import * as THREE from 'three';
@@ -23,13 +23,28 @@ const defaultConfig = {
     timeScale: 0.75,
 
     // FFT spectrum
-    waveHeight: 2.4,        // RMS surface height in metres (master wave-height gain)
+    waveHeight: 2.4,        // RMS surface height in metres at 22 m/s wind; scales with wind squared
     chopAmount: 1.0,        // High-frequency normal detail injected in the fragment shader
     detailPatchiness: 0.7,  // Wind-lane modulation of the detail ripples (0 = uniform carpet)
     swellDirSpread: 6.0,    // Directional spread exponent at the spectral peak; higher = longer crests
     rippleSuppress: 0.8,    // Metre-scale spectrum cutoff; drains uniform micro-chop from the normals
     fftPatchSize: 420.0,    // Physical side of the periodic FFT tile (m); longest wave it can hold
     fftResolution: 256,     // FFT grid is fftResolution^2 (power of two; refresh to apply)
+
+    // Macro swell: analytic Gerstner components far longer than the FFT patch,
+    // layered under the spectral field so the whole surface heaves and rolls.
+    // Amplitude is quoted at the reference wind (22 m/s) and scales with the
+    // square of the wind speed, the same gain the FFT field uses.
+    swellAmplitude: 3.0,    // Combined crest height of the macro swell (m); 0 disables
+    swellWavelength: 280.0, // Primary component wavelength (m); secondaries derive from it
+    swellDirection: 25.0,   // Travel direction in degrees (kept near the wind for coherence)
+    swellSteepness: 0.6,    // Trochoid sharpening 0-1; horizontal drift toward the crests
+
+    // Tide: a slow time-driven oscillation of the whole water level. Real
+    // tides are astronomical (time-determined), so this is a pure sinusoid
+    // of simulation time with a demo-scale period instead of 12 hours.
+    tideAmplitude: 1.0,     // Water-level half-range in metres; 0 disables
+    tidePeriod: 240.0,      // Full flood-to-flood cycle in simulation seconds
 
     // Foam physics
     foamDecay: 0.96,
@@ -263,6 +278,11 @@ export const getters = {
 
     get windVector() {
         const rad = config.windDirection * Math.PI / 180;
+        return new THREE.Vector2(Math.cos(rad), Math.sin(rad));
+    },
+
+    get swellVector() {
+        const rad = config.swellDirection * Math.PI / 180;
         return new THREE.Vector2(Math.cos(rad), Math.sin(rad));
     },
 

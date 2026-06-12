@@ -16,7 +16,13 @@
  * per parameter change, so `waveHeight` is a predictable metre-scale gain
  * independent of wind speed, patch size or the internal spectrum constant.
  *
- * Version: 0.2.0
+ * On top of the FFT field sits an analytic macro swell: a few Gerstner
+ * components far longer than the FFT patch can carry, added during the patch
+ * resolve so the whole surface heaves and rolls instead of wrinkling a static
+ * plane. The same GLSL is evaluated by the far-field skirt, so the seam
+ * between grid and skirt cannot open.
+ *
+ * Version: 0.4.0
  */
 
 import * as THREE from 'three';
@@ -26,6 +32,68 @@ const TWO_PI = Math.PI * 2.0;
 // Internal Phillips constant; it cancels in the RMS normalisation, so its
 // absolute value only needs to stay clear of float under/overflow.
 const PHILLIPS_A = 1.0;
+// Wind speed at which `waveHeight` equals the on-screen RMS height (m/s).
+// The actual gain scales with (windSpeed / WIND_REF)^2, the fully developed
+// sea relation, so a rising wind grows the waves instead of merely
+// stretching the same RMS budget into longer, flatter modes. The clamp keeps
+// a light breeze from flattening the sea to glass and a gale from blowing
+// the half-float displacement range out.
+export const WIND_REF = 22.0;
+export function windGain(windSpeed) {
+    const g = (windSpeed / WIND_REF) * (windSpeed / WIND_REF);
+    return Math.min(Math.max(g, 0.12), 4.0);
+}
+
+/**
+ * Analytic macro swell shared by the patch resolve and the skirt vertex
+ * shader. Three deterministic Gerstner components are derived from one set
+ * of primary uniforms (amplitude / wavelength / direction / steepness):
+ * fixed wavelength and amplitude ratios plus small direction and phase
+ * offsets, so a single crest never reads as a synthetic sine carpet.
+ * Returns xyz = world displacement, w = Jacobian contribution (the trace
+ * term of the horizontal-displacement gradient, negative on the crests).
+ */
+export const SWELL_GLSL = `
+    uniform float uSwellAmp;
+    uniform float uSwellLen;
+    uniform vec2 uSwellDir;
+    uniform float uSwellSteep;
+    uniform float uTide;
+
+    vec4 macroSwell(vec2 xz, float t) {
+        // Tide: a uniform, slowly oscillating water level driven purely by
+        // time on the CPU. Riding in the displacement field means the SWE
+        // boundary coupling sees it too, so the shoreline floods and drains.
+        vec3 disp = vec3(0.0, uTide, 0.0);
+        float jac = 0.0;
+        if (uSwellAmp < 1e-4) return vec4(disp, jac);
+        // Per-component (wavelength ratio, amplitude share, direction offset
+        // in radians, phase offset). Amplitude shares sum to 1 so uSwellAmp
+        // is the metre-scale crest height of the combined swell.
+        vec4 comp[3];
+        comp[0] = vec4(1.00, 0.588,  0.00, 0.0);
+        comp[1] = vec4(0.62, 0.265,  0.42, 2.1);
+        comp[2] = vec4(0.41, 0.147, -0.31, 4.4);
+
+        for (int i = 0; i < 3; i++) {
+            float amp = uSwellAmp * comp[i].y;
+            float k = ${TWO_PI.toFixed(8)} / max(uSwellLen * comp[i].x, 1.0);
+            float ca = cos(comp[i].z);
+            float sa = sin(comp[i].z);
+            vec2 d = normalize(vec2(uSwellDir.x * ca - uSwellDir.y * sa,
+                                    uSwellDir.x * sa + uSwellDir.y * ca));
+            float w = sqrt(${GRAVITY.toFixed(4)} * k);
+            float f = dot(d, xz) * k - w * t + comp[i].w;
+            // Steepness budget split across components: q*k*amp = steep/3
+            // per wave, so the summed trochoid never self-intersects.
+            float q = uSwellSteep / (3.0 * k * max(amp, 1e-4));
+            disp.y += amp * sin(f);
+            disp.xz += d * (q * amp * cos(f));
+            jac -= q * amp * k * sin(f);
+        }
+        return vec4(disp, jac);
+    }
+`;
 
 export class FFTOcean {
     constructor(renderer, { size = 256, patchSize = 400 } = {}) {
@@ -390,7 +458,10 @@ export class FFTOcean {
         });
 
         // Tile the periodic spatial tile into a camera-centred patch, matching
-        // the displacement texture the rest of the pipeline samples.
+        // the displacement texture the rest of the pipeline samples. The
+        // analytic macro swell is layered in here, so every consumer of the
+        // displacement texture (mesh, foam, SWE coupling, spray) inherits the
+        // large-scale heave without knowing it exists.
         this.patchMaterial = new THREE.RawShaderMaterial({
             glslVersion: glsl3,
             vertexShader,
@@ -403,10 +474,14 @@ export class FFTOcean {
                 uniform vec2 uGridOffset;
                 uniform float uGridSize;
                 uniform float uPatch;
+                uniform float uTime;
+                ${SWELL_GLSL}
 
                 void main() {
                     vec2 worldPos = (vUv - 0.5) * uGridSize + uGridOffset;
-                    fragColor = texture(uTile, worldPos / uPatch);
+                    vec4 field = texture(uTile, worldPos / uPatch);
+                    vec4 swell = macroSwell(worldPos, uTime);
+                    fragColor = vec4(field.rgb + swell.xyz, field.a + swell.w);
                 }
             `,
             uniforms: {
@@ -414,6 +489,12 @@ export class FFTOcean {
                 uGridOffset: { value: new THREE.Vector2(0, 0) },
                 uGridSize: { value: 1000 },
                 uPatch: { value: this.patchSize },
+                uTime: { value: 0 },
+                uSwellAmp: { value: 0 },
+                uSwellLen: { value: 300 },
+                uSwellDir: { value: new THREE.Vector2(1, 0) },
+                uSwellSteep: { value: 0.6 },
+                uTide: { value: 0 },
             },
         });
     }
@@ -439,12 +520,28 @@ export class FFTOcean {
         this._runPass(this.h0Material, this.h0Target);
 
         // Integrate the spectrum RMS so waveHeight maps to metres of RMS height
+        // at the reference wind, then grow it with the square of the wind so
+        // a stronger wind raises the sea instead of flattening it
         const rms = this._spectrumRms(windSpeed, windDir, swellSpread, rippleCutoff);
-        this.heightScale = waveHeight / Math.max(rms, 1e-6);
+        this.heightScale = waveHeight * windGain(windSpeed) / Math.max(rms, 1e-6);
         this.resolveMaterial.uniforms.uHeightScale.value = this.heightScale;
         this.resolveMaterial.uniforms.uChoppiness.value = choppiness;
 
         this.renderer.setRenderTarget(null);
+    }
+
+    /** Update the analytic macro-swell uniforms on the patch resolve. */
+    setSwell({ amplitude, wavelength, dir, steepness }) {
+        const u = this.patchMaterial.uniforms;
+        u.uSwellAmp.value = amplitude;
+        u.uSwellLen.value = wavelength;
+        u.uSwellDir.value.copy(dir);
+        u.uSwellSteep.value = steepness;
+    }
+
+    /** Per-frame tidal water-level offset baked into the displacement field. */
+    setTide(offset) {
+        this.patchMaterial.uniforms.uTide.value = offset;
     }
 
     _spectrumRms(windSpeed, windDir, swellSpread, rippleCutoff) {
@@ -505,10 +602,11 @@ export class FFTOcean {
     }
 
     /** Tile the spatial tile into the camera-centred displacement patch. */
-    resolveToPatch(target, gridOffset, gridSize) {
+    resolveToPatch(target, gridOffset, gridSize, time) {
         const u = this.patchMaterial.uniforms;
         u.uGridOffset.value.copy(gridOffset);
         u.uGridSize.value = gridSize;
+        u.uTime.value = time;
         this._runPass(this.patchMaterial, target);
         this.renderer.setRenderTarget(null);
     }

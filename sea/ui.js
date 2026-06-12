@@ -7,7 +7,7 @@
  * persisted to localStorage; "Refresh" reloads to apply grid-level changes,
  * "Reset" clears saved values and restores defaults.
  *
- * Version: 0.8.0
+ * Version: 0.10.0
  */
 
 import { config, saveConfigToStorage, clearSavedConfig } from './config.js';
@@ -32,7 +32,7 @@ export class UI {
                     title: 'Wave Physics',
                     target: config,
                     params: [
-                        { key: 'windSpeed', label: 'Wind Speed', type: 'number', min: 1, max: 50, step: 0.5, description: 'Drives the Phillips spectrum shape and peak wavelength' },
+                        { key: 'windSpeed', label: 'Wind Speed', type: 'number', min: 1, max: 50, step: 0.5, description: 'Drives spectrum shape and overall sea height (waves and swell grow with wind squared)' },
                         { key: 'windDirection', label: 'Wind Direction', type: 'number', min: 0, max: 360, step: 1, description: 'Main wave travel direction in degrees' },
                         { key: 'choppiness', label: 'Choppiness', type: 'number', min: 0, max: 3, step: 0.05, description: 'Horizontal displacement scale; higher = sharper crests, over-folds past ~2.0' },
                         { key: 'crestLean', label: 'Crest Lean', type: 'number', min: 0, max: 1.5, step: 0.05, description: 'Stylised forward-lean: pitches crests downwind for a steep front face' },
@@ -43,11 +43,23 @@ export class UI {
                     title: 'Spectrum (FFT)',
                     target: config,
                     params: [
-                        { key: 'waveHeight', label: 'Wave Height', type: 'number', min: 0, max: 8, step: 0.1, description: 'RMS surface height in metres; the master wave-height gain' },
+                        { key: 'waveHeight', label: 'Wave Height', type: 'number', min: 0, max: 8, step: 0.1, description: 'RMS surface height in metres at 22 m/s wind; the master wave-height gain' },
                         { key: 'swellDirSpread', label: 'Crest Length', type: 'number', min: 1, max: 16, step: 0.5, description: 'Directional spread exponent at the spectral peak; higher = longer, more parallel swell crests' },
                         { key: 'rippleSuppress', label: 'Ripple Cutoff', type: 'number', min: 0, max: 3, step: 0.05, description: 'Metre-scale spectrum rolloff; higher removes more of the uniform micro-chop' },
                         { key: 'chopAmount', label: 'Detail', type: 'number', min: 0, max: 2, step: 0.05, description: 'High-frequency normal detail injected in the fragment shader' },
                         { key: 'detailPatchiness', label: 'Detail Patchiness', type: 'number', min: 0, max: 1, step: 0.05, description: 'Breaks the detail ripples into drifting wind lanes with glassy gaps; 0 = uniform' },
+                    ],
+                },
+                {
+                    title: 'Macro Swell',
+                    target: config,
+                    params: [
+                        { key: 'swellAmplitude', label: 'Amplitude', type: 'number', min: 0, max: 8, step: 0.1, description: 'Crest height of the long swell in metres at 22 m/s wind (grows with wind squared); 0 disables' },
+                        { key: 'swellWavelength', label: 'Wavelength', type: 'number', min: 100, max: 1200, step: 10, description: 'Primary swell wavelength in metres; far longer than the FFT patch can carry' },
+                        { key: 'swellDirection', label: 'Direction', type: 'number', min: 0, max: 360, step: 1, description: 'Swell travel direction in degrees; keep near the wind for a coherent sea' },
+                        { key: 'swellSteepness', label: 'Steepness', type: 'number', min: 0, max: 1, step: 0.05, description: 'Trochoid sharpening; horizontal drift gathers the surface toward the crests' },
+                        { key: 'tideAmplitude', label: 'Tide Range', type: 'number', min: 0, max: 4, step: 0.1, description: 'Half-range of the time-driven tidal water level in metres; floods the beach at high tide' },
+                        { key: 'tidePeriod', label: 'Tide Period', type: 'number', min: 30, max: 1200, step: 10, description: 'Full tidal cycle in simulation seconds (a demo-scale stand-in for the 12 h real cycle)' },
                     ],
                 },
                 {
@@ -137,7 +149,9 @@ export class UI {
                     target: {},
                     params: [
                         { key: 'calm', label: 'Calm Seas', type: 'button', onClick: () => this.applyPreset({
-                            windSpeed: 6, choppiness: 0.9, waveHeight: 0.8,
+                            windSpeed: 6, choppiness: 0.9, waveHeight: 2.0,
+                            swellAmplitude: 2.0, swellWavelength: 380, swellSteepness: 0.35,
+                            tideAmplitude: 0.6,
                             foamThreshold: 0.85, fogDensity: 0.0008,
                             waterColorDeep: 0x1fa9ce, waterColorMid: 0x3fd2ea,
                             waterColorShallow: 0x8fe8f6, waterColorShadow: 0x66b8dc,
@@ -146,7 +160,9 @@ export class UI {
                             sssStrength: 1.8,
                         }) },
                         { key: 'sunny', label: 'Sunny Swell', type: 'button', onClick: () => this.applyPreset({
-                            windSpeed: 16, choppiness: 1.2, waveHeight: 2.0,
+                            windSpeed: 16, choppiness: 1.2, waveHeight: 2.6,
+                            swellAmplitude: 3.0, swellWavelength: 300, swellSteepness: 0.6,
+                            tideAmplitude: 1.0,
                             foamThreshold: 0.75, foamDecay: 0.965, fogDensity: 0.0011,
                             waterColorDeep: 0x139ec7, waterColorMid: 0x27c9e7,
                             waterColorShallow: 0x76dff3, waterColorShadow: 0x52add6,
@@ -155,7 +171,9 @@ export class UI {
                             sssColor: 0xcaf7fd, sssStrength: 1.4, specPower: 36,
                         }) },
                         { key: 'overcast', label: 'Overcast Storm', type: 'button', onClick: () => this.applyPreset({
-                            windSpeed: 30, choppiness: 1.5, waveHeight: 4.2,
+                            windSpeed: 30, choppiness: 1.5, waveHeight: 2.6,
+                            swellAmplitude: 3.5, swellWavelength: 460, swellSteepness: 0.7,
+                            tideAmplitude: 1.5,
                             foamThreshold: 0.6, foamDecay: 0.975, fogDensity: 0.0018,
                             waterColorDeep: 0x24343a, waterColorMid: 0x3d575c,
                             waterColorShallow: 0x5d7a76, waterColorShadow: 0x46606b,

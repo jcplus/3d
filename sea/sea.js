@@ -27,13 +27,13 @@
  * the accumulated foam along it. Convergent chop then gathers the foam into
  * the streaky downwind webbing of a worked sea instead of static blooms.
  *
- * Version: 0.8.0
+ * Version: 0.10.0
  */
 
 import * as THREE from 'three';
 import { GPUComputationRenderer } from 'three/addons/misc/GPUComputationRenderer.js';
 import { config, getters } from './config.js';
-import { FFTOcean } from './fft.js';
+import { FFTOcean, SWELL_GLSL, windGain } from './fft.js';
 import { ShallowWater } from './swe.js';
 import { SpraySystem } from './spray.js';
 import { SWE_ORIGIN, SWE_SIZE } from './terrain.js';
@@ -87,7 +87,9 @@ export class Ocean {
      */
     updateSpectrum(force = false) {
         const key = [config.windSpeed, config.windDirection, config.waveHeight, config.choppiness,
-            config.swellDirSpread, config.rippleSuppress].join(',');
+            config.swellDirSpread, config.rippleSuppress,
+            config.swellAmplitude, config.swellWavelength,
+            config.swellDirection, config.swellSteepness].join(',');
         if (!force && key === this.spectrumKey) return;
         this.spectrumKey = key;
 
@@ -100,7 +102,19 @@ export class Ocean {
             swellSpread: config.swellDirSpread,
             rippleCutoff: config.rippleSuppress,
         });
-        this.ampNorm = Math.max(config.waveHeight * 2.5, 0.5);
+        // The macro swell is wind-driven like the FFT field: its amplitude is
+        // quoted at the reference wind and grows with the wind squared
+        const gain = windGain(config.windSpeed);
+        this.swellAmp = config.swellAmplitude * gain;
+        this.fft.setSwell({
+            amplitude: this.swellAmp,
+            wavelength: config.swellWavelength,
+            dir: getters.swellVector,
+            steepness: config.swellSteepness,
+        });
+        // The macro swell raises the tallest crests, so the shading reference
+        // amplitude includes it; otherwise the ramp saturates on every swell
+        this.ampNorm = Math.max((config.waveHeight * 2.5 + config.swellAmplitude) * gain, 0.5);
     }
 
     initGPGPU() {
@@ -349,6 +363,11 @@ export class Ocean {
                 uAmpNorm: { value: this.ampNorm },
                 uFoamThreshold: { value: config.foamThreshold },
                 uWindDir: { value: getters.windVector },
+                uSwellAmp: { value: this.swellAmp },
+                uSwellLen: { value: config.swellWavelength },
+                uSwellDir: { value: getters.swellVector },
+                uSwellSteep: { value: config.swellSteepness },
+                uTide: { value: 0 },
             },
         });
 
@@ -363,15 +382,19 @@ export class Ocean {
         return `
             uniform sampler2D uTile;
             uniform float uPatch;
+            uniform float uTime;
+            ${SWELL_GLSL}
 
             varying vec3 vWorldPosition;
             varying vec3 vNormal;
             varying float vDisplacement;
 
             // Sample the periodic FFT tile (RGB = Dx, height, Dz) by world
-            // position; the same tile feeds the main grid, so the seam matches.
+            // position and layer the analytic macro swell on top — the exact
+            // sum the patch resolve feeds the main grid, so the seam matches.
             vec3 sampleDisp(vec2 worldXZ) {
-                return texture2D(uTile, fract(worldXZ / uPatch)).xyz;
+                return texture2D(uTile, fract(worldXZ / uPatch)).xyz
+                    + macroSwell(worldXZ, uTime).xyz;
             }
 
             void main() {
@@ -518,12 +541,18 @@ export class Ocean {
         const offsetX = Math.floor(camera.position.x / patch) * patch;
         const offsetZ = Math.floor(camera.position.z / patch) * patch;
 
+        // Tidal water level: a pure function of simulation time, baked into
+        // the displacement field so the near-shore layer floods and drains
+        const tide = config.tideAmplitude
+            * Math.sin(Math.PI * 2.0 * config.time / Math.max(config.tidePeriod, 1.0));
+        this.fft.setTide(tide);
+
         // Evolve the FFT field and tile it into the camera-centred displacement
         // texture the rest of the pipeline samples. The two targets alternate
         // so the foam pass can difference them into a surface velocity.
         this.physicsIndex ^= 1;
         this.fft.update(config.time);
-        this.fft.resolveToPatch(this.physicsTargets[this.physicsIndex], new THREE.Vector2(offsetX, offsetZ), this.gridSize);
+        this.fft.resolveToPatch(this.physicsTargets[this.physicsIndex], new THREE.Vector2(offsetX, offsetZ), this.gridSize, config.time);
         const physicsTexture = this.physicsTargets[this.physicsIndex].texture;
 
         if (this.foamUniforms) {
@@ -615,6 +644,11 @@ export class Ocean {
             s.uAmpNorm.value = this.ampNorm;
             s.uFoamThreshold.value = config.foamThreshold;
             s.uWindDir.value.copy(getters.windVector);
+            s.uSwellAmp.value = this.swellAmp;
+            s.uSwellLen.value = config.swellWavelength;
+            s.uSwellDir.value.copy(getters.swellVector);
+            s.uSwellSteep.value = config.swellSteepness;
+            s.uTide.value = tide;
         }
 
         // Advance the wave-strike spray pool and splat its foam into the shared
