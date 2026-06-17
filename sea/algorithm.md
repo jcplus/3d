@@ -934,6 +934,82 @@ uniform 加进 `macroSwell` 的垂直位移。走位移纹理通道意味着 SWE
 
 ---
 
+## 17. 参考视频运动对标层（M4.7）
+
+目标是把现有混合海洋调成参考视频里“低频大运动主导、高频细节局部装饰”的节奏。
+此阶段不改变 L0/L2/L3 的外部接口，只在各层内部增加更可信的驱动项。
+
+### 17.1 低频 FFT cascade
+
+单个 420 m FFT tile 容易显出周期，并且远海缺少宽峰慢起伏。新增一个低频 cascade：
+
+```
+mainTile  = FFT(N, 420 m)      // 中短浪
+longTile  = FFT(128, 1400 m)   // 慢速长浪
+disp      = main.rgb + long.rgb * longWaveStrength + macroSwell.rgb
+J         = main.J + (long.J - 1) * longWaveStrength + macroSwell.J
+```
+
+`longWaveSpeedScale < 1` 只作用于低频 cascade 的演化时间，让大水体运动更重。
+macro swell 保留为确定性主涌浪补充，但默认振幅下调，避免单一正弦支配画面。
+
+### 17.2 泡沫生命周期
+
+泡沫生成从“只看 Jacobian”升级为三条件门控：
+
+```
+fold      = smoothstep(threshold, threshold - 0.35, J)
+crestGate = smoothstep(..., height / ampNorm)
+slopeGate = smoothstep(..., |∇height|)
+source    = fold * crestGate * slopeGate
+```
+
+累积泡沫继续按水平位移差分做平流，`foamStreak` 控制拖尾强度。显示时拆成：
+
+- 即时白帽：当前压缩浪峰的硬边 crescent；
+- 拖尾泡沫：平流后的累积纹理；
+- 残留 lacing：Worley 细胞边界打碎的网状泡沫。
+
+### 17.3 SWE 方向性边界耦合
+
+浅水层深水 ring 不再四边同强度强制水位，而是按边界内法线与入射浪向加权：
+
+```
+incoming = smoothstep(-0.15, 0.75, dot(waveDir, inwardNormal))
+boundary = ring * mix(0.18, 1.0, incoming)
+```
+
+边界同时注入 L0 水位和水平速度：
+
+```
+forcedDepth = max(0, seaLevel + disp.y * coupling - bed)
+waveVel = (disp.xz - prevDisp.xz) / dt + waveDir * max(disp.y, 0) * 0.35
+```
+
+这样近岸浪线从迎浪侧成组推进，背浪边只保留弱开放边界，回流由管道模型自然产生。
+
+### 17.4 撞击式 spray
+
+浪击粒子重生由三条件决定：
+
+```
+height      = surface.y - seaLevel
+impact      = dot(surfaceVelocity, -reefNormal)
+compression = 1 - Jacobian
+spawn if height > threshold && impact > eps && compression > eps
+```
+
+出生速度使用入射水平速度关于礁石法线的反射方向，再叠加向上速度与少量随机扰动：
+
+```
+v0 = normalise(reflect(waveVel, reefNormal) + reefNormal * burstBias) * burst
+   + up * verticalBurst
+```
+
+因此水花只在真正迎浪撞击礁石时增强，而不是单纯随浪高随机喷发。
+
+---
+
 ## 附录：数学常数
 
 | 常数 | 值 | 说明 |

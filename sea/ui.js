@@ -7,7 +7,7 @@
  * persisted to localStorage; "Refresh" reloads to apply grid-level changes,
  * "Reset" clears saved values and restores defaults.
  *
- * Version: 0.10.0
+ * Version: 0.12.0
  */
 
 import { config, saveConfigToStorage, clearSavedConfig } from './config.js';
@@ -46,6 +46,9 @@ export class UI {
                         { key: 'waveHeight', label: 'Wave Height', type: 'number', min: 0, max: 8, step: 0.1, description: 'RMS surface height in metres at 22 m/s wind; the master wave-height gain' },
                         { key: 'swellDirSpread', label: 'Crest Length', type: 'number', min: 1, max: 16, step: 0.5, description: 'Directional spread exponent at the spectral peak; higher = longer, more parallel swell crests' },
                         { key: 'rippleSuppress', label: 'Ripple Cutoff', type: 'number', min: 0, max: 3, step: 0.05, description: 'Metre-scale spectrum rolloff; higher removes more of the uniform micro-chop' },
+                        { key: 'longWaveStrength', label: 'Long Waves', type: 'number', min: 0, max: 1.5, step: 0.05, description: 'Slow low-frequency FFT cascade mixed under the main sea' },
+                        { key: 'longWavePatchSize', label: 'Long Patch', type: 'number', min: 600, max: 2400, step: 50, description: 'Physical side of the long-wave FFT tile in metres; applied after Refresh' },
+                        { key: 'longWaveSpeedScale', label: 'Long Speed', type: 'number', min: 0.2, max: 1.2, step: 0.02, description: 'Time scale for the long-wave cascade; lower feels heavier' },
                         { key: 'chopAmount', label: 'Detail', type: 'number', min: 0, max: 2, step: 0.05, description: 'High-frequency normal detail injected in the fragment shader' },
                         { key: 'detailPatchiness', label: 'Detail Patchiness', type: 'number', min: 0, max: 1, step: 0.05, description: 'Breaks the detail ripples into drifting wind lanes with glassy gaps; 0 = uniform' },
                     ],
@@ -69,6 +72,7 @@ export class UI {
                         { key: 'foamThreshold', label: 'Coverage', type: 'number', min: 0, max: 1, step: 0.01, description: 'Foam coverage; drives both crest generation and the display cut, higher = more foam' },
                         { key: 'foamDecay', label: 'Decay', type: 'number', min: 0.8, max: 0.999, step: 0.001, description: 'Per-frame foam persistence; closer to 1 = longer-lived foam' },
                         { key: 'foamGrowth', label: 'Growth', type: 'number', min: 0.2, max: 6, step: 0.1, description: 'Foam accumulation rate at the crests' },
+                        { key: 'foamStreak', label: 'Streak Drift', type: 'number', min: 0, max: 4, step: 0.05, description: 'How strongly foam is pulled along by horizontal wave motion' },
                     ],
                 },
                 {
@@ -149,8 +153,9 @@ export class UI {
                     target: {},
                     params: [
                         { key: 'calm', label: 'Calm Seas', type: 'button', onClick: () => this.applyPreset({
-                            windSpeed: 6, choppiness: 0.9, waveHeight: 2.0,
-                            swellAmplitude: 2.0, swellWavelength: 380, swellSteepness: 0.35,
+                            windSpeed: 6, choppiness: 0.8, waveHeight: 1.4,
+                            longWaveStrength: 0.55, longWavePatchSize: 1500, longWaveSpeedScale: 0.55,
+                            swellAmplitude: 1.2, swellWavelength: 520, swellSteepness: 0.28,
                             tideAmplitude: 0.6,
                             foamThreshold: 0.85, fogDensity: 0.0008,
                             waterColorDeep: 0x1fa9ce, waterColorMid: 0x3fd2ea,
@@ -160,10 +165,11 @@ export class UI {
                             sssStrength: 1.8,
                         }) },
                         { key: 'sunny', label: 'Sunny Swell', type: 'button', onClick: () => this.applyPreset({
-                            windSpeed: 16, choppiness: 1.2, waveHeight: 2.6,
-                            swellAmplitude: 3.0, swellWavelength: 300, swellSteepness: 0.6,
+                            windSpeed: 20, choppiness: 1.35, waveHeight: 2.8,
+                            longWaveStrength: 1.25, longWavePatchSize: 1400, longWaveSpeedScale: 0.48,
+                            swellAmplitude: 2.6, swellWavelength: 620, swellSteepness: 0.58,
                             tideAmplitude: 1.0,
-                            foamThreshold: 0.75, foamDecay: 0.965, fogDensity: 0.0011,
+                            foamThreshold: 0.62, foamDecay: 0.975, foamGrowth: 3.4, foamStreak: 2.5, fogDensity: 0.0011,
                             waterColorDeep: 0x139ec7, waterColorMid: 0x27c9e7,
                             waterColorShallow: 0x76dff3, waterColorShadow: 0x52add6,
                             foamColor: 0xf4fbfe,
@@ -171,21 +177,26 @@ export class UI {
                             sssColor: 0xcaf7fd, sssStrength: 1.4, specPower: 36,
                         }) },
                         { key: 'overcast', label: 'Overcast Storm', type: 'button', onClick: () => this.applyPreset({
-                            windSpeed: 30, choppiness: 1.5, waveHeight: 2.6,
-                            swellAmplitude: 3.5, swellWavelength: 460, swellSteepness: 0.7,
+                            windSpeed: 32, choppiness: 1.7, waveHeight: 3.2,
+                            longWaveStrength: 1.35, longWavePatchSize: 1700, longWaveSpeedScale: 0.42,
+                            swellAmplitude: 3.2, swellWavelength: 760, swellSteepness: 0.72,
                             tideAmplitude: 1.5,
-                            foamThreshold: 0.6, foamDecay: 0.975, fogDensity: 0.0018,
+                            foamThreshold: 0.5, foamDecay: 0.982, foamGrowth: 4.4, foamStreak: 3.0, fogDensity: 0.0018,
                             waterColorDeep: 0x24343a, waterColorMid: 0x3d575c,
                             waterColorShallow: 0x5d7a76, waterColorShadow: 0x46606b,
                             foamColor: 0xdde6e8,
                             skyColorHorizon: 0xb9bdbd, skyColorZenith: 0x73797c,
                             sssColor: 0x7a9a92, sssStrength: 0.8, specPower: 24, specIntensity: 0.3,
+                            sprayBirthRate: 16, spraySpawnThreshold: 0.9, spraySpeed: 12, sprayFoam: 1.7,
                         }) },
                         { key: 'randomize', label: 'Randomize', type: 'button', onClick: () => this.applyPreset({
                             windSpeed: 5 + Math.random() * 30,
                             choppiness: 0.6 + Math.random() * 1.0,
                             windDirection: Math.random() * 360,
                             waveHeight: 0.6 + Math.random() * 3.5,
+                            longWaveStrength: 0.35 + Math.random() * 0.7,
+                            longWavePatchSize: 900 + Math.random() * 900,
+                            longWaveSpeedScale: 0.45 + Math.random() * 0.35,
                             foamThreshold: 0.5 + Math.random() * 0.4,
                         }) },
                     ],

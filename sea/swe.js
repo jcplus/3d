@@ -14,7 +14,7 @@
  * have zero depth and emit no flux), and is unconditionally non-negative
  * because outflow is scaled to the water actually available in a cell.
  *
- * Version: 0.1.3
+ * Version: 0.2.0
  */
 
 import * as THREE from 'three';
@@ -57,14 +57,17 @@ export class ShallowWater {
 
         const wu = this.waterVar.material.uniforms;
         wu['uDt'] = { value: 0.0 };
+        wu['uFrameDt'] = { value: 0.0 };
         wu['uCellSize'] = { value: this.cellSize };
         wu['uSweOrigin'] = { value: this.origin };
         wu['uSweSize'] = { value: this.size };
         wu['uSeaLevel'] = { value: config.seaLevel };
         wu['uCoupling'] = { value: config.sweCoupling };
         wu['uDispMap'] = { value: null };
+        wu['uDispPrev'] = { value: null };
         wu['uGridOffset'] = { value: new THREE.Vector2(0, 0) };
         wu['uGridSize'] = { value: config.gridSize };
+        wu['uWaveDir'] = { value: new THREE.Vector2(1, 0) };
 
         this.fu = fu;
         this.wu = wu;
@@ -109,6 +112,7 @@ export class ShallowWater {
     getFluxShader() {
         return `
             uniform float uDt;
+            uniform float uFrameDt;
             uniform float uG;
             uniform float uCellSize;
             uniform float uDamp;
@@ -168,8 +172,10 @@ export class ShallowWater {
             uniform float uSeaLevel;
             uniform float uCoupling;
             uniform sampler2D uDispMap;
+            uniform sampler2D uDispPrev;
             uniform vec2 uGridOffset;
             uniform float uGridSize;
+            uniform vec2 uWaveDir;
 
             ${TERRAIN_GLSL}
 
@@ -210,14 +216,25 @@ export class ShallowWater {
                 float ring = smoothstep(3.0 * texel, 0.0, edge);
                 if (ring > 0.001 && b < uSeaLevel - 4.0) {
                     vec2 ouv = (wp - uGridOffset) / uGridSize + 0.5;
-                    float dispY = 0.0;
+                    vec3 disp = vec3(0.0);
+                    vec3 dispPrev = vec3(0.0);
                     if (ouv.x > 0.0 && ouv.x < 1.0 && ouv.y > 0.0 && ouv.y < 1.0) {
-                        dispY = texture2D(uDispMap, ouv).y;
+                        disp = texture2D(uDispMap, ouv).xyz;
+                        dispPrev = texture2D(uDispPrev, ouv).xyz;
                     }
-                    float forced = max(0.0, (uSeaLevel + dispY * uCoupling) - b);
-                    dNew = mix(dNew, forced, ring);
-                    vx = mix(vx, 0.0, ring);
-                    vz = mix(vz, 0.0, ring);
+                    vec2 inward = vec2(0.0);
+                    if (uv.x < texel * 3.0) inward = vec2(1.0, 0.0);
+                    else if (uv.x > 1.0 - texel * 3.0) inward = vec2(-1.0, 0.0);
+                    else if (uv.y < texel * 3.0) inward = vec2(0.0, 1.0);
+                    else inward = vec2(0.0, -1.0);
+                    float incoming = smoothstep(-0.15, 0.75, dot(normalize(uWaveDir), inward));
+                    float boundary = ring * mix(0.18, 1.0, incoming);
+                    float forced = max(0.0, (uSeaLevel + disp.y * uCoupling) - b);
+                    vec2 waveVel = (disp.xz - dispPrev.xz) / max(uFrameDt, 1e-4);
+                    waveVel += normalize(uWaveDir) * max(disp.y, 0.0) * 0.35;
+                    dNew = mix(dNew, forced, boundary);
+                    vx = mix(vx, waveVel.x * uCoupling, boundary);
+                    vz = mix(vz, waveVel.y * uCoupling, boundary);
                 }
 
                 gl_FragColor = vec4(dNew, vx, vz, b + dNew);
@@ -228,16 +245,20 @@ export class ShallowWater {
     /**
      * Advance the solver by `substeps` pipe-model steps of length `dt`.
      */
-    update(dispMap, gridOffset, gridSize, dt, substeps) {
+    update(dispMap, dispPrev, gridOffset, gridSize, dt, substeps) {
         if (dt <= 0.0) return;
         this.fu.uDt.value = dt;
         this.fu.uDamp.value = Math.exp(-config.sweDrag * dt);
         this.wu.uDt.value = dt;
+        this.wu.uFrameDt.value = dt * Math.max(1, substeps);
         this.wu.uSeaLevel.value = config.seaLevel;
         this.wu.uCoupling.value = config.sweCoupling;
         this.wu.uDispMap.value = dispMap;
+        this.wu.uDispPrev.value = dispPrev || dispMap;
         this.wu.uGridOffset.value.copy(gridOffset);
         this.wu.uGridSize.value = gridSize;
+        const windRad = config.windDirection * Math.PI / 180;
+        this.wu.uWaveDir.value.set(Math.cos(windRad), Math.sin(windRad));
 
         for (let s = 0; s < substeps; s++) {
             this.gpu.compute();

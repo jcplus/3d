@@ -4,7 +4,7 @@
  * Uses Proxy-based reactive state management.
  * All modules read from this single source of truth.
  *
- * Version: 0.10.0
+ * Version: 0.12.0
  */
 
 import * as THREE from 'three';
@@ -23,20 +23,23 @@ const defaultConfig = {
     timeScale: 0.75,
 
     // FFT spectrum
-    waveHeight: 2.4,        // RMS surface height in metres at 22 m/s wind; scales with wind squared
-    chopAmount: 1.0,        // High-frequency normal detail injected in the fragment shader
+    waveHeight: 2.8,        // RMS surface height in metres at 22 m/s wind; scales with wind squared
+    chopAmount: 0.85,        // High-frequency normal detail injected in the fragment shader
     detailPatchiness: 0.7,  // Wind-lane modulation of the detail ripples (0 = uniform carpet)
     swellDirSpread: 6.0,    // Directional spread exponent at the spectral peak; higher = longer crests
     rippleSuppress: 0.8,    // Metre-scale spectrum cutoff; drains uniform micro-chop from the normals
     fftPatchSize: 420.0,    // Physical side of the periodic FFT tile (m); longest wave it can hold
     fftResolution: 256,     // FFT grid is fftResolution^2 (power of two; refresh to apply)
+    longWaveStrength: 1.25,     // Low-frequency FFT cascade mixed under the main sea (0 disables)
+    longWavePatchSize: 1400.0,  // Physical side of the slow long-wave tile (m)
+    longWaveSpeedScale: 0.48,   // Slows the low-frequency cascade for heavier ocean timing
 
     // Macro swell: analytic Gerstner components far longer than the FFT patch,
     // layered under the spectral field so the whole surface heaves and rolls.
     // Amplitude is quoted at the reference wind (22 m/s) and scales with the
     // square of the wind speed, the same gain the FFT field uses.
-    swellAmplitude: 3.0,    // Combined crest height of the macro swell (m); 0 disables
-    swellWavelength: 280.0, // Primary component wavelength (m); secondaries derive from it
+    swellAmplitude: 2.6,    // Combined crest height of the macro swell (m); 0 disables
+    swellWavelength: 620.0, // Primary component wavelength (m); secondaries derive from it
     swellDirection: 25.0,   // Travel direction in degrees (kept near the wind for coherence)
     swellSteepness: 0.6,    // Trochoid sharpening 0-1; horizontal drift toward the crests
 
@@ -47,9 +50,10 @@ const defaultConfig = {
     tidePeriod: 240.0,      // Full flood-to-flood cycle in simulation seconds
 
     // Foam physics
-    foamDecay: 0.96,
-    foamThreshold: 0.8, // Range: 0.6 - 0.9 (Higher = more foam generated but higher cutoff for display)
-    foamGrowth: 2.0,
+    foamDecay: 0.975,
+    foamThreshold: 0.62, // Range: 0.6 - 0.9 (Higher = more foam generated but higher cutoff for display)
+    foamGrowth: 3.4,
+    foamStreak: 2.5,    // Downwind advection strength for lingering foam trails
 
     // Stylised shading
     sssStrength: 1.4,        // Directional translucency through backlit crests
@@ -67,16 +71,16 @@ const defaultConfig = {
     // beach and an isolated tide pool (see terrain.js / swe.js)
     sweEnabled: true,
     sweSubsteps: 4,        // Pipe-model substeps per frame (CFL stability)
-    sweDrag: 0.6,          // Velocity damping; higher = water settles faster
+    sweDrag: 0.38,         // Velocity damping; higher = water settles faster
     sweCoupling: 1.0,      // Open-ocean swell injected at the deep boundary
-    sweFoam: 1.2,          // Shore wash / breaker foam strength
+    sweFoam: 2.0,          // Shore wash / breaker foam strength
     sweResolution: 256,    // SWE grid resolution (refresh to apply)
 
     // Wave-strike spray (L3): GPGPU particle pool thrown off the reefs when
     // the open-ocean swell breaks against them (see spray.js)
     sprayEnabled: true,
-    sprayBirthRate: 8.0,        // Respawn attempts per dead particle per second
-    spraySpawnThreshold: 1.2,   // Crest height over sea level needed to erupt (m)
+    sprayBirthRate: 12.0,        // Respawn attempts per dead particle per second
+    spraySpawnThreshold: 0.85,   // Crest height over sea level needed to erupt (m)
     spraySpeed: 9.0,            // Burst speed at birth (horizontal; vertical x1.6)
     sprayGravity: 22.0,         // Downward acceleration on airborne droplets
     sprayDrag: 0.25,           // Air drag; higher = droplets slow faster
@@ -179,13 +183,14 @@ export function resetConfig() {
 // === localStorage persistence (migrated from sea_surface) ===
 
 const STORAGE_KEY = 'sea_gpu_config';
+const CONFIG_VERSION = '0.12.0';
 
 /**
  * Save current config to localStorage (time/deltaTime excluded)
  */
 export function saveConfigToStorage() {
     try {
-        const out = {};
+        const out = { __version: CONFIG_VERSION };
         Object.keys(defaultConfig).forEach(key => {
             if (key !== 'time' && key !== 'deltaTime') {
                 out[key] = config[key];
@@ -215,6 +220,7 @@ export function clearSavedConfig() {
         const saved = localStorage.getItem(STORAGE_KEY);
         if (!saved) return;
         const parsed = JSON.parse(saved);
+        if (parsed.__version !== CONFIG_VERSION) return;
         Object.keys(parsed).forEach(key => {
             if (key in defaultConfig && key !== 'time' && key !== 'deltaTime') {
                 config[key] = parsed[key];

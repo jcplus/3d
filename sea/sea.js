@@ -27,7 +27,7 @@
  * the accumulated foam along it. Convergent chop then gathers the foam into
  * the streaky downwind webbing of a worked sea instead of static blooms.
  *
- * Version: 0.10.0
+ * Version: 0.12.0
  */
 
 import * as THREE from 'three';
@@ -56,6 +56,11 @@ export class Ocean {
         this.fft = new FFTOcean(this.renderer, {
             size: config.fftResolution,
             patchSize: config.fftPatchSize,
+        });
+        const longSize = Math.min(128, config.fftResolution);
+        this.longFft = new FFTOcean(this.renderer, {
+            size: longSize,
+            patchSize: config.longWavePatchSize,
         });
         // Double-buffered so the foam pass can difference two consecutive
         // frames into a horizontal surface velocity for foam advection
@@ -88,6 +93,7 @@ export class Ocean {
     updateSpectrum(force = false) {
         const key = [config.windSpeed, config.windDirection, config.waveHeight, config.choppiness,
             config.swellDirSpread, config.rippleSuppress,
+            config.longWaveStrength, config.longWavePatchSize, config.longWaveSpeedScale,
             config.swellAmplitude, config.swellWavelength,
             config.swellDirection, config.swellSteepness].join(',');
         if (!force && key === this.spectrumKey) return;
@@ -102,6 +108,19 @@ export class Ocean {
             swellSpread: config.swellDirSpread,
             rippleCutoff: config.rippleSuppress,
         });
+        this.longFft.setParams({
+            windSpeed: config.windSpeed,
+            windDir: new THREE.Vector2(Math.cos(windRad), Math.sin(windRad)),
+            waveHeight: config.waveHeight,
+            choppiness: config.choppiness * 0.75,
+            swellSpread: Math.max(config.swellDirSpread * 1.5, 8.0),
+            rippleCutoff: Math.max(config.rippleSuppress * 3.0, 2.4),
+        });
+        this.fft.setLongWave({
+            texture: this.longFft.tileTexture,
+            patchSize: this.longFft.patchSize,
+            strength: config.longWaveStrength,
+        });
         // The macro swell is wind-driven like the FFT field: its amplitude is
         // quoted at the reference wind and grows with the wind squared
         const gain = windGain(config.windSpeed);
@@ -114,7 +133,7 @@ export class Ocean {
         });
         // The macro swell raises the tallest crests, so the shading reference
         // amplitude includes it; otherwise the ramp saturates on every swell
-        this.ampNorm = Math.max((config.waveHeight * 2.5 + config.swellAmplitude) * gain, 0.5);
+        this.ampNorm = Math.max((config.waveHeight * (2.5 + config.longWaveStrength) + config.swellAmplitude) * gain, 0.5);
     }
 
     initGPGPU() {
@@ -168,6 +187,8 @@ export class Ocean {
         foamUniforms['uSweSize'] = { value: SWE_SIZE };
         foamUniforms['uSweEnabled'] = { value: config.sweEnabled ? 1.0 : 0.0 };
         foamUniforms['uSweFoam'] = { value: config.sweFoam };
+        foamUniforms['uAmpNorm'] = { value: this.ampNorm };
+        foamUniforms['uWindDir'] = { value: getters.windVector };
 
         this.foamUniforms = foamUniforms;
     }
@@ -190,6 +211,8 @@ export class Ocean {
             uniform float uSweSize;
             uniform float uSweEnabled;
             uniform float uSweFoam;
+            uniform float uAmpNorm;
+            uniform vec2 uWindDir;
 
             void main() {
                 vec2 uv = gl_FragCoord.xy / resolution.xy;
@@ -220,10 +243,21 @@ export class Ocean {
                 }
 
                 // 4. Generate from the open-ocean crest compression: a soft
-                // onset over the whole folding range plus a hard kick where the
-                // surface truly overturns, so whitecaps read as events
+                // onset over the folding range, gated by crest height and slope
+                // so whitecaps form on high breaking crests instead of every
+                // compressed trough.
                 float fold = smoothstep(uThreshold, uThreshold - 0.35, jacobian);
-                float generation = (fold * 0.05 + fold * fold * 0.07) * uGrowth;
+                vec2 texel = 1.0 / resolution.xy;
+                float hC = physics.y;
+                float hX = texture2D(uPhysics, uv + vec2(texel.x, 0.0)).y;
+                float hZ = texture2D(uPhysics, uv + vec2(0.0, texel.y)).y;
+                float slope = length(vec2(hX - hC, hZ - hC));
+                float crestGate = smoothstep(0.08, 0.48, hC / max(uAmpNorm, 0.5) + 0.35);
+                float slopeGate = smoothstep(0.010, 0.060, slope);
+                float windLane = sin(dot((uv - 0.5) * uGridSize + uGridOffset, normalize(uWindDir)) * 0.075 + uTime * 0.35);
+                windLane = smoothstep(-0.45, 0.75, windLane);
+                float breaker = fold * max(crestGate * slopeGate, crestGate * 0.35 * windLane);
+                float generation = (breaker * 0.08 + breaker * breaker * 0.12) * uGrowth;
 
                 // 5. Near-shore foam: breakers (fast + shallow) and the wet/dry
                 // swash line, sampled from the SWE state at this world position
@@ -234,9 +268,9 @@ export class Ocean {
                         vec4 sw = texture2D(uSweTexture, sUv);
                         float depth = sw.x;
                         float speed = length(sw.yz);
-                        float breaking = smoothstep(0.6, 1.8, speed) * smoothstep(2.5, 0.2, depth);
-                        float swash = smoothstep(0.02, 0.18, depth) * smoothstep(0.6, 0.18, depth);
-                        generation += clamp(breaking + swash * 0.5, 0.0, 1.0) * 0.12 * uSweFoam;
+                        float breaking = smoothstep(0.25, 1.4, speed) * smoothstep(3.0, 0.16, depth);
+                        float swash = smoothstep(0.015, 0.16, depth) * smoothstep(1.0, 0.14, depth);
+                        generation += clamp(breaking + swash * 0.8, 0.0, 1.0) * 0.18 * uSweFoam;
                     }
                 }
 
@@ -347,7 +381,10 @@ export class Ocean {
             uniforms: {
                 uTime: this.timeUniform,
                 uTile: { value: this.fft.tileTexture },
+                uLongTile: { value: this.longFft.tileTexture },
                 uPatch: { value: this.fft.patchSize },
+                uLongPatch: { value: this.longFft.patchSize },
+                uLongStrength: { value: config.longWaveStrength },
                 uWaterColorDeep: { value: getters.waterColorDeepColor },
                 uWaterColorMid: { value: getters.waterColorMidColor },
                 uWaterColorShallow: { value: getters.waterColorShallowColor },
@@ -381,7 +418,10 @@ export class Ocean {
     getSkirtVertexShader() {
         return `
             uniform sampler2D uTile;
+            uniform sampler2D uLongTile;
             uniform float uPatch;
+            uniform float uLongPatch;
+            uniform float uLongStrength;
             uniform float uTime;
             ${SWELL_GLSL}
 
@@ -394,6 +434,7 @@ export class Ocean {
             // sum the patch resolve feeds the main grid, so the seam matches.
             vec3 sampleDisp(vec2 worldXZ) {
                 return texture2D(uTile, fract(worldXZ / uPatch)).xyz
+                    + texture2D(uLongTile, fract(worldXZ / uLongPatch)).xyz * uLongStrength
                     + macroSwell(worldXZ, uTime).xyz;
             }
 
@@ -420,7 +461,10 @@ export class Ocean {
     getSkirtFragmentShader() {
         return `
             uniform sampler2D uTile;
+            uniform sampler2D uLongTile;
             uniform float uPatch;
+            uniform float uLongPatch;
+            uniform float uLongStrength;
             uniform vec3 uWaterColorDeep;
             uniform vec3 uWaterColorMid;
             uniform vec3 uWaterColorShallow;
@@ -490,6 +534,7 @@ export class Ocean {
                 // line. A wind-stretched vein field breaks them into streaks and
                 // a very low-frequency mask hides the tile repetition.
                 float jac = texture2D(uTile, fract(vWorldPosition.xz / uPatch)).a;
+                jac += (texture2D(uLongTile, fract(vWorldPosition.xz / uLongPatch)).a - 1.0) * uLongStrength;
                 vec2 wDir = normalize(uWindDir);
                 vec2 wuv = vec2(dot(vWorldPosition.xz, wDir) * 0.35,
                                 dot(vWorldPosition.xz, vec2(-wDir.y, wDir.x)));
@@ -515,6 +560,7 @@ export class Ocean {
         // Unbind active textures to prevent WebGL feedback loops
         if (this.renderer && this.renderer.state) {
             this.renderer.state.unbindTexture(this.fft.tileTexture);
+            this.renderer.state.unbindTexture(this.longFft.tileTexture);
             this.renderer.state.unbindTexture(this.physicsTargets[this.physicsIndex].texture);
             this.renderer.state.unbindTexture(this.physicsTargets[this.physicsIndex ^ 1].texture);
             if (this.swe) {
@@ -551,6 +597,7 @@ export class Ocean {
         // texture the rest of the pipeline samples. The two targets alternate
         // so the foam pass can difference them into a surface velocity.
         this.physicsIndex ^= 1;
+        this.longFft.update(config.time * config.longWaveSpeedScale);
         this.fft.update(config.time);
         this.fft.resolveToPatch(this.physicsTargets[this.physicsIndex], new THREE.Vector2(offsetX, offsetZ), this.gridSize, config.time);
         const physicsTexture = this.physicsTargets[this.physicsIndex].texture;
@@ -574,6 +621,8 @@ export class Ocean {
             this.foamUniforms.uSweTexture.value = this.swe.getStateTexture();
             this.foamUniforms.uSweEnabled.value = config.sweEnabled ? 1.0 : 0.0;
             this.foamUniforms.uSweFoam.value = config.sweFoam;
+            this.foamUniforms.uAmpNorm.value = this.ampNorm;
+            this.foamUniforms.uWindDir.value.copy(getters.windVector);
         }
 
         this.gridOffset.set(offsetX, offsetZ);
@@ -590,7 +639,7 @@ export class Ocean {
             const frameDt = Math.min(config.deltaTime, 0.05) * config.timeScale;
             const substeps = Math.max(1, Math.floor(config.sweSubsteps));
             const dtSub = Math.min(frameDt / substeps, 0.08);
-            this.swe.update(physicsTexture, this.gridOffset, this.gridSize, dtSub, substeps);
+            this.swe.update(physicsTexture, this.physicsTargets[this.physicsIndex ^ 1].texture, this.gridOffset, this.gridSize, dtSub, substeps);
         }
 
         if (this.material) {
@@ -644,6 +693,9 @@ export class Ocean {
             s.uAmpNorm.value = this.ampNorm;
             s.uFoamThreshold.value = config.foamThreshold;
             s.uWindDir.value.copy(getters.windVector);
+            s.uLongTile.value = this.longFft.tileTexture;
+            s.uLongPatch.value = this.longFft.patchSize;
+            s.uLongStrength.value = config.longWaveStrength;
             s.uSwellAmp.value = this.swellAmp;
             s.uSwellLen.value = config.swellWavelength;
             s.uSwellDir.value.copy(getters.swellVector);
@@ -656,7 +708,7 @@ export class Ocean {
         if (this.spray) {
             const sprayDt = Math.min(config.deltaTime, 0.05) * config.timeScale;
             const foamTarget = this.gpuCompute.getCurrentRenderTarget(this.foamVariable);
-            this.spray.update(sprayDt, physicsTexture, this.gridOffset, this.gridSize, foamTarget);
+            this.spray.update(sprayDt, physicsTexture, this.physicsTargets[this.physicsIndex ^ 1].texture, this.gridOffset, this.gridSize, foamTarget);
         }
     }
 
@@ -666,6 +718,7 @@ export class Ocean {
         if (this.spray) this.spray.dispose();
         if (this.swe) this.swe.dispose();
         if (this.fft) this.fft.dispose();
+        if (this.longFft) this.longFft.dispose();
         if (this.physicsTargets) this.physicsTargets.forEach(t => t.dispose());
     }
 }

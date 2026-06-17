@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="version" content="0.7.0">
+    <meta name="version" content="0.9.0">
     <title>Real-Time Ocean Simulation</title>
     <style>
         * {
@@ -48,7 +48,7 @@
     <div id="loading">Loading Ocean Simulation...</div>
     <div id="info">
         WASD: Move | Mouse: Look | Scroll: Zoom<br>
-        WebGL 2.0 Gerstner Ocean Simulation
+        WebGL 2.0 Hybrid FFT Ocean Simulation
     </div>
 
     <!-- Three.js from CDN -->
@@ -230,6 +230,34 @@
             g.yz = a0.yz * x12.xz + h.yz * x12.yw;
             return 130.0 * dot(m, g);
         }
+
+        float hash21(vec2 p) {
+            p = fract(p * vec2(123.34, 456.21));
+            p += dot(p, p + 45.32);
+            return fract(p.x * p.y);
+        }
+
+        float cellularEdge(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            float f1 = 8.0;
+            float f2 = 8.0;
+            for (int y = -1; y <= 1; y++) {
+                for (int x = -1; x <= 1; x++) {
+                    vec2 g = vec2(float(x), float(y));
+                    vec2 o = vec2(hash21(i + g), hash21(i + g + 17.7));
+                    vec2 r = g + o - f;
+                    float d = dot(r, r);
+                    if (d < f1) {
+                        f2 = f1;
+                        f1 = d;
+                    } else if (d < f2) {
+                        f2 = d;
+                    }
+                }
+            }
+            return sqrt(f2) - sqrt(f1);
+        }
         
         void main() {
             vec3 viewDir = normalize(uCameraPosition - vWorldPosition);
@@ -254,7 +282,7 @@
                 patches = smoothstep(-0.35, 0.55, patches);
                 detailAmp *= mix(1.0, patches, uDetailPatchiness);
 
-                vec2 drift = vec2(0.6, 0.8) * uTime;
+                vec2 drift = vec2(0.6, 0.8) * uTime * 1.55;
                 float e = 0.35;
                 vec2 p1 = vWorldPosition.xz * 0.55 + drift * 1.1;
                 vec2 p2 = vWorldPosition.xz * 1.7 - drift * 0.6;
@@ -326,19 +354,25 @@
             // Display cut moves the SAME direction as generation: a higher panel
             // Threshold lowers the cut, so more crest fold shows as foam. The
             // tear noise jitters it for a hand-drawn edge.
-            float crestCut = (0.95 - 0.6 * uFoamThreshold) + (tear - 0.5) * 0.2;
-            float accCut = 0.9 - 0.45 * uFoamThreshold;
+            float crestCut = (0.82 - 0.62 * uFoamThreshold) + (tear - 0.5) * 0.18;
+            float accCut = 0.72 - 0.44 * uFoamThreshold;
+            float cells = cellularEdge(vWorldPosition.xz * 0.105 + uWindDir * uTime * 0.12);
+            float lace = smoothstep(0.20, 0.045, cells) * smoothstep(accCut * 0.45, accCut + 0.16, foamAcc);
+            vec2 wuv = vec2(dot(vWorldPosition.xz, normalize(uWindDir)) * 0.18,
+                            dot(vWorldPosition.xz, vec2(-uWindDir.y, uWindDir.x)) * 0.75);
+            float windTear = smoothstep(-0.25, 0.55, snoise(wuv + vec2(uTime * 0.22, 0.0)));
 
             // Crest lip: instantaneous fold above the cut — the crisp crescent.
-            float whitecap = smoothstep(crestCut, crestCut + 0.1, crestNow);
+            float whitecap = smoothstep(crestCut, crestCut + 0.075, crestNow);
             // Trailing streak: advected accumulation behind the crest, broken by
             // the tear so it trails rather than blankets.
-            float trailing = smoothstep(accCut, accCut + 0.15, foamAcc) * smoothstep(0.45, 0.8, tear);
+            float trailing = smoothstep(accCut, accCut + 0.13, foamAcc) * max(smoothstep(0.38, 0.78, tear), windTear * 0.75);
 
             // Near-shore breakers: fast, shallow shallow-water flow turns white.
-            float shoreFoam = smoothstep(0.8, 1.0, vSweSpeed) * vSweMask;
+            float shoreBand = smoothstep(0.015, 0.16, vSweDepth) * smoothstep(1.25, 0.16, vSweDepth);
+            float shoreFoam = (smoothstep(0.35, 1.25, vSweSpeed) + shoreBand * 0.85) * vSweMask;
 
-            float foamMix = clamp(whitecap + trailing * 0.6 + shoreFoam, 0.0, 1.0);
+            float foamMix = clamp(whitecap * 1.25 + trailing * 0.85 + lace * 0.8 + shoreFoam, 0.0, 1.0);
             // Foam is the flat palette white; shadowed foam dips towards the
             // shadow swatch instead of grey so it stays inside the palette.
             vec3 foamColor = mix(mix(uFoamColor, uWaterColorShadow, 0.25), uFoamColor, litBand);

@@ -17,7 +17,7 @@
  * Coupling is strictly one-way (L0 -> particles); the pool never feeds back
  * into the height field beyond the cosmetic foam splat.
  *
- * Version: 0.1.0
+ * Version: 0.2.0
  */
 
 import * as THREE from 'three';
@@ -86,6 +86,7 @@ export class SpraySystem {
             uObstacles: { value: this.obstacles },
             uObstacleCount: { value: this.obstacleCount },
             uDispMap: { value: null },
+            uDispPrev: { value: null },
             uGridOffset: { value: new THREE.Vector2(0, 0) },
             uGridSize: { value: config.gridSize },
         };
@@ -147,6 +148,7 @@ export class SpraySystem {
             uniform vec4 uObstacles[${OBSTACLE_MAX}];
             uniform float uObstacleCount;
             uniform sampler2D uDispMap;
+            uniform sampler2D uDispPrev;
             uniform vec2 uGridOffset;
             uniform float uGridSize;
 
@@ -162,6 +164,20 @@ export class SpraySystem {
                 vec2 uv = (worldXZ - uGridOffset) / uGridSize + 0.5;
                 if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return uSeaLevel;
                 return uSeaLevel + texture2D(uDispMap, uv).y;
+            }
+
+            vec4 surfaceData(vec2 worldXZ) {
+                vec2 uv = (worldXZ - uGridOffset) / uGridSize + 0.5;
+                if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return vec4(0.0, 0.0, 0.0, 1.0);
+                return texture2D(uDispMap, uv);
+            }
+
+            vec2 surfaceVelocity(vec2 worldXZ) {
+                vec2 uv = (worldXZ - uGridOffset) / uGridSize + 0.5;
+                if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return vec2(0.0);
+                vec3 now = texture2D(uDispMap, uv).xyz;
+                vec3 prev = texture2D(uDispPrev, uv).xyz;
+                return (now.xz - prev.xz) / max(uDt, 1e-4);
             }
 
             // Try to respawn a dead particle. Returns true and fills the out
@@ -189,17 +205,25 @@ export class SpraySystem {
                 vec2 dir = vec2(cos(ang), sin(ang));
                 vec2 hitXZ = vec2(ob.x, ob.z) + dir * ob.w;
 
-                float strength = surfaceY(hitXZ) - uSeaLevel;
+                vec4 surf = surfaceData(hitXZ);
+                float strength = surf.y;
                 if (strength < uSpawnThreshold) return false;
+                vec2 waveVel = surfaceVelocity(hitXZ) + uWaveDir * max(strength, 0.0) * 0.5;
+                float impact = dot(waveVel, -dir);
+                float compression = clamp(1.0 - surf.a, 0.0, 1.5);
+                if (impact < 0.25 || compression < 0.03) return false;
 
-                float energy = clamp(strength / max(uSpawnThreshold, 0.2), 0.5, 3.0);
+                float energy = clamp((strength / max(uSpawnThreshold, 0.2)) * (0.7 + impact * 0.16) * (0.8 + compression), 0.5, 3.2);
                 float up = 0.6 + 0.8 * hash11(seed * 5.9 + uTime * 17.0);
                 vec3 jitter = vec3(
                     hash11(seed * 9.1 + uTime * 12.0) - 0.5,
                     hash11(seed * 4.3 + uTime * 14.0) * 0.4,
                     hash11(seed * 6.7 + uTime * 19.0) - 0.5
                 );
-                oVel = (vec3(dir.x, 0.0, dir.y) * uHorizBurst
+                vec3 incoming = vec3(waveVel.x, 0.0, waveVel.y);
+                vec3 normal = normalize(vec3(dir.x, 0.0, dir.y));
+                vec3 reflected = reflect(incoming, normal);
+                oVel = (normalize(reflected + normal * uHorizBurst * 0.35) * uHorizBurst
                         + vec3(0.0, 1.0, 0.0) * uVertBurst * up) * energy
                         + jitter * uHorizBurst * 0.4;
                 oPos = vec3(hitXZ.x, uSeaLevel + strength * 0.6, hitXZ.y);
@@ -446,11 +470,12 @@ export class SpraySystem {
      *
      * @param dt          frame delta (seconds, already time-scaled)
      * @param dispMap     L0 displacement texture
+     * @param dispPrev    previous L0 displacement texture
      * @param gridOffset  current camera-snapped grid origin
      * @param gridSize    grid world size
      * @param foamTarget  WebGLRenderTarget backing the shared foam texture
      */
-    update(dt, dispMap, gridOffset, gridSize, foamTarget) {
+    update(dt, dispMap, dispPrev, gridOffset, gridSize, foamTarget) {
         if (!config.sprayEnabled) {
             this.billboards.visible = false;
             this.reefGroup.visible = true;
@@ -474,6 +499,7 @@ export class SpraySystem {
         u.uVertBurst.value = config.spraySpeed * 1.6;
         u.uObstacleCount.value = this.obstacleCount;
         u.uDispMap.value = dispMap;
+        u.uDispPrev.value = dispPrev || dispMap;
         u.uGridOffset.value.copy(gridOffset);
         u.uGridSize.value = gridSize;
         for (let i = 0; i < this.obstacleCount; i++) {

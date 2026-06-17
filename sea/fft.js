@@ -22,7 +22,7 @@
  * plane. The same GLSL is evaluated by the far-field skirt, so the seam
  * between grid and skirt cannot open.
  *
- * Version: 0.4.0
+ * Version: 0.5.0
  */
 
 import * as THREE from 'three';
@@ -475,13 +475,19 @@ export class FFTOcean {
                 uniform float uGridSize;
                 uniform float uPatch;
                 uniform float uTime;
+                uniform sampler2D uLongTile;
+                uniform float uLongPatch;
+                uniform float uLongStrength;
                 ${SWELL_GLSL}
 
                 void main() {
                     vec2 worldPos = (vUv - 0.5) * uGridSize + uGridOffset;
                     vec4 field = texture(uTile, worldPos / uPatch);
+                    vec4 longField = texture(uLongTile, worldPos / uLongPatch);
                     vec4 swell = macroSwell(worldPos, uTime);
-                    fragColor = vec4(field.rgb + swell.xyz, field.a + swell.w);
+                    vec3 disp = field.rgb + longField.rgb * uLongStrength + swell.xyz;
+                    float jac = field.a + (longField.a - 1.0) * uLongStrength + swell.w;
+                    fragColor = vec4(disp, jac);
                 }
             `,
             uniforms: {
@@ -490,6 +496,9 @@ export class FFTOcean {
                 uGridSize: { value: 1000 },
                 uPatch: { value: this.patchSize },
                 uTime: { value: 0 },
+                uLongTile: { value: this.tileTarget.texture },
+                uLongPatch: { value: this.patchSize },
+                uLongStrength: { value: 0 },
                 uSwellAmp: { value: 0 },
                 uSwellLen: { value: 300 },
                 uSwellDir: { value: new THREE.Vector2(1, 0) },
@@ -537,6 +546,14 @@ export class FFTOcean {
         u.uSwellLen.value = wavelength;
         u.uSwellDir.value.copy(dir);
         u.uSwellSteep.value = steepness;
+    }
+
+    /** Optional slow low-frequency FFT cascade mixed during patch resolve. */
+    setLongWave({ texture, patchSize, strength }) {
+        const u = this.patchMaterial.uniforms;
+        u.uLongTile.value = texture || this.tileTarget.texture;
+        u.uLongPatch.value = patchSize || this.patchSize;
+        u.uLongStrength.value = strength || 0;
     }
 
     /** Per-frame tidal water-level offset baked into the displacement field. */
