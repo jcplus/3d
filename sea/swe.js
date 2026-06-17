@@ -14,7 +14,7 @@
  * have zero depth and emit no flux), and is unconditionally non-negative
  * because outflow is scaled to the water actually available in a cell.
  *
- * Version: 0.2.0
+ * Version: 0.2.1
  */
 
 import * as THREE from 'three';
@@ -95,8 +95,8 @@ export class ShallowWater {
                 const b = terrainHeightJS(x, z);
 
                 let surf = config.seaLevel;
-                const pr = Math.hypot(x - 85.0, z + 70.0);
-                if (pr < 30.0) surf += 0.8 * ((x - 85.0) / 30.0);
+                const pr = Math.hypot(x - 60.0, z + 76.0);
+                if (pr < 30.0) surf += 0.8 * ((x - 60.0) / 30.0);
 
                 const d = Math.max(0.0, surf - b);
                 const idx = (j * N + i) * 4;

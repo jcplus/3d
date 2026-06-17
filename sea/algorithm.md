@@ -1011,16 +1011,19 @@ v0 = normalise(reflect(waveVel, reefNormal) + reefNormal * burstBias) * burst
 ### 17.5 岛屿地形与材质分层
 
 旧近岸地形是 cross-shore 方形 patch，俯视时会读成同深度的矩形浅水块。现行地形改为
-以有噪声扰动的椭圆 SDF 表示岛屿：
+确定性随机灰度海拔场驱动的岛屿：
 
 ```
-sd = length((p - islandCentre) / islandRadius) - 1 + boundaryNoise
-height = deepOcean -> reefShelf -> wetBeach -> inland
+coast = irregularRadialSdf(p, islandCentre, angularLobes, fbmBoundary)
+grey  = clamp(inlandMask(coast) * (baseRelief + fbmRelief + ridgedRelief), 0, 1)
+height = deepOcean -> reefShelf -> beach -> grey-driven inland highland
 ```
 
-深度随 `sd` 分带渐进，并叠加沿岸沙坝、冲沟和小尺度起伏；SWE 与渲染仍采同一个
-`terrainHeight`。海底 fragment shader 不再只按 slope 混沙/石，而是按高度、坡度和噪声混合
-湿沙、干沙、硬土、软土、岩石与植被，让水线、沙滩、内陆和陡坡都有不同材质。
+灰度场相当于虚拟海拔图：低灰度对应礁棚、湿沙和干沙，中灰度过渡到土壤，高灰度与坡度共同生成
+岩石和植被。深度随 `coast` 分带渐进，并叠加沿岸沙坝、冲沟、小尺度起伏和潮池；SWE 与渲染仍采同一个
+`terrainHeight`。SWE 求解域可以继续是方形纹理，但海面混合和近岸泡沫额外乘以 `terrainHeight` 派生的
+礁棚遮罩，因此不会把方形计算边界渲染成正方形岛屿或浅水块。海底 fragment shader 使用高度、坡度和
+多频噪声计算材质权重并归一化混合湿沙、干沙、硬土、软土、岩石与植被，避免地貌衔接处出现泾渭分明的硬边。水下焦散和吸收只乘到 `height < seaLevel` 的区域，陆地不会再被蓝绿色细胞状焦散覆盖。
 
 ---
 

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="version" content="0.11.0">
+    <meta name="version" content="0.12.2">
     <title>Real-Time Ocean Simulation</title>
     <style>
         * {
@@ -94,6 +94,8 @@
         varying float vSweDepth;
         varying float vSweSpeed;
 
+        //__TERRAIN__
+
         void main() {
             vUv = uv;
 
@@ -137,7 +139,10 @@
                 vec2 sUv = (worldPosition.xz - uSweOrigin) / uSweSize + 0.5;
                 if (sUv.x > 0.001 && sUv.x < 0.999 && sUv.y > 0.001 && sUv.y < 0.999) {
                     vec4 sw = texture2D(uSweTexture, sUv);
-                    mask = smoothstep(0.0, 0.09, min(min(sUv.x, 1.0 - sUv.x), min(sUv.y, 1.0 - sUv.y)));
+                    float edgeMask = smoothstep(0.0, 0.10, min(min(sUv.x, 1.0 - sUv.x), min(sUv.y, 1.0 - sUv.y)));
+                    float bed = terrainHeight(worldPosition.xz);
+                    float shelfMask = smoothstep(-30.0, -5.5, bed);
+                    mask = edgeMask * shelfMask;
                     sweDepth = sw.x;
                     sweSpeed = length(sw.yz);
 
@@ -389,7 +394,7 @@
             float trailing = smoothstep(accCut, accCut + 0.13, foamAcc) * max(smoothstep(0.38, 0.78, tear), windTear * 0.75);
 
             // Near-shore breakers: fast, shallow shallow-water flow turns white.
-            float shoreBand = smoothstep(0.015, 0.16, vSweDepth) * smoothstep(1.25, 0.16, vSweDepth);
+            float shoreBand = smoothstep(0.015, 0.16, vSweDepth) * (1.0 - smoothstep(0.16, 1.25, vSweDepth));
             float shoreFoam = (smoothstep(0.35, 1.25, vSweSpeed) + shoreBand * 0.85) * vSweMask;
 
             float foamMix = clamp(whitecap * 1.25 + trailing * 0.85 + lace * 0.8 + shoreFoam, 0.0, 1.0);
@@ -520,57 +525,76 @@
             float grain = fbm2(vWorldPosition.xz * 0.075);
             float coarse = fbm2(vWorldPosition.xz * 0.022 + 8.4);
 
-            vec3 deepColor = vec3(0.06, 0.16, 0.22);
-            vec3 wetSand = vec3(0.50, 0.43, 0.31);
-            vec3 paleSand = vec3(0.78, 0.70, 0.50);
-            vec3 drySand = vec3(0.86, 0.77, 0.54);
-            vec3 hardSoil = vec3(0.42, 0.34, 0.23);
-            vec3 softSoil = vec3(0.28, 0.36, 0.20);
-            vec3 rockColor = vec3(0.30, 0.31, 0.29);
-            vec3 vegetation = vec3(0.18, 0.34, 0.16);
+            vec3 deepColor = vec3(0.05, 0.14, 0.20);
+            vec3 wetSand = vec3(0.46, 0.38, 0.25);
+            vec3 paleSand = vec3(0.78, 0.68, 0.43);
+            vec3 drySand = vec3(0.92, 0.78, 0.48);
+            vec3 hardSoil = vec3(0.43, 0.30, 0.17);
+            vec3 softSoil = vec3(0.25, 0.33, 0.15);
+            vec3 rockColor = vec3(0.28, 0.27, 0.24);
+            vec3 vegetation = vec3(0.08, 0.30, 0.10);
 
-            // Material zones: underwater sand, wet beach, dry sand, hard soil,
-            // rocky slopes and patchy vegetation. Noise jitters the thresholds
-            // so the island does not read as a single painted blob.
-            float wetT = smoothstep(-0.5, 0.7, height);
-            float dryT = smoothstep(1.0, 4.2, height + (grain - 0.5) * 1.2);
-            float soilT = smoothstep(3.5, 9.0, height + (coarse - 0.5) * 3.0);
-            float vegT = smoothstep(6.5, 11.0, height + (grain - 0.5) * 2.2)
-                       * smoothstep(0.72, 0.18, slope)
-                       * smoothstep(0.38, 0.72, coarse);
-            float rockT = smoothstep(0.18, 0.55, slope)
-                        + smoothstep(10.0, 16.0, height) * 0.45;
+            // Material weights are based on virtual elevation, slope and
+            // noise. Wide smooth bands keep transitions natural instead of
+            // drawing sharp biome borders.
+            float macro = fbm2(vWorldPosition.xz * 0.012 + 21.7);
+            float ridge = abs(fbm2(vWorldPosition.xz * 0.045 - 4.8) - 0.5) * 2.0;
+            float land = smoothstep(0.05, 1.2, height);
+            float underwater = 1.0 - smoothstep(-0.8, 0.35, height);
+            float beachBand = (1.0 - smoothstep(2.6, 6.8, height + (grain - 0.5) * 1.8))
+                            * smoothstep(-2.0, 0.45, height + (coarse - 0.5) * 0.7);
+            float wetBand = (1.0 - smoothstep(0.15, 1.35, height + (coarse - 0.5) * 0.7))
+                          * smoothstep(-1.8, 0.45, height + (grain - 0.5) * 0.9);
+            float dryBand = smoothstep(0.35, 3.4, height + (grain - 0.5) * 1.5)
+                          * (1.0 - smoothstep(4.8, 8.2, height + (coarse - 0.5) * 3.0));
+            float soilBand = smoothstep(3.0, 10.5, height + (macro - 0.5) * 5.5);
+            float vegBand = smoothstep(4.2, 11.8, height + (macro - 0.5) * 4.0)
+                          * (1.0 - smoothstep(0.16, 0.58, slope))
+                          * smoothstep(0.24, 0.62, macro)
+                          * land;
+            float rockBand = (smoothstep(0.22, 0.54, slope + (ridge - 0.5) * 0.16)
+                           + smoothstep(11.0, 22.0, height + (grain - 0.5) * 3.0) * 0.65)
+                           * land;
 
-            vec3 baseColor = mix(paleSand, wetSand, 1.0 - wetT);
-            baseColor = mix(baseColor, drySand, dryT);
-            baseColor = mix(baseColor, hardSoil, soilT * 0.65);
-            baseColor = mix(baseColor, softSoil, soilT * (1.0 - rockT) * 0.45);
-            baseColor = mix(baseColor, vegetation, clamp(vegT, 0.0, 0.85));
-            baseColor = mix(baseColor, rockColor, clamp(rockT, 0.0, 0.85));
-            baseColor *= 0.88 + grain * 0.24;
+            float wDeep = underwater;
+            float wWet = wetBand * beachBand;
+            float wPale = (1.0 - wetBand) * beachBand * 0.75;
+            float wDry = dryBand * (1.0 - wetBand) * land;
+            float wSoil = soilBand * land * (1.0 - vegBand * 0.35);
+            float wVeg = vegBand * 1.8;
+            float wRock = clamp(rockBand, 0.0, 1.6);
+            float wSum = wDeep + wWet + wPale + wDry + wSoil + wVeg + wRock + 0.001;
+
+            vec3 baseColor = (deepColor * wDeep
+                + wetSand * wWet
+                + paleSand * wPale
+                + drySand * wDry
+                + hardSoil * wSoil * 0.72
+                + softSoil * wSoil * (0.30 + 0.30 * macro)
+                + vegetation * wVeg
+                + rockColor * wRock) / wSum;
+            baseColor *= 0.78 + grain * 0.16 + coarse * 0.10;
+            baseColor = mix(baseColor, baseColor * vec3(0.70, 0.78, 0.68), clamp(rockBand * 0.45, 0.0, 0.55));
             
-            // Caustics projection
+            // Caustics and absorption only affect submerged terrain; dry land
+            // must keep its geological material colours.
+            float depth = max(uSeaLevel - vWorldPosition.y, 0.0);
+            float waterMask = smoothstep(0.08, 1.4, depth);
             vec2 causticCoord = vWorldPosition.xz * 0.1;
             float caustics = voronoi(causticCoord);
             caustics = pow(1.0 - caustics, 3.0) * 0.8;
             
-            // Domain warp for animated caustics
             vec2 warp = vec2(
                 sin(causticCoord.y * 2.0 + uTime * 0.5) * 0.2,
                 cos(causticCoord.x * 2.0 + uTime * 0.3) * 0.2
             );
             float caustics2 = voronoi(causticCoord + warp);
             caustics2 = pow(1.0 - caustics2, 2.0) * 0.5;
+            caustics = max(caustics, caustics2) * waterMask;
+            baseColor += vec3(0.18, 0.34, 0.36) * caustics;
             
-            caustics = max(caustics, caustics2);
-            
-            // Add caustics
-            baseColor += vec3(0.3, 0.5, 0.6) * caustics;
-            
-            // Depth fog / absorption
-            float depth = uSeaLevel - vWorldPosition.y;
             float absorption = exp(-depth * 0.02);
-            baseColor = mix(deepColor, baseColor, absorption);
+            baseColor = mix(deepColor, baseColor, mix(1.0, absorption, waterMask));
 
             // Distance fog: dissolve into the same sky-horizon backdrop the
             // ocean fades to, so the floor reads as infinite with no visible

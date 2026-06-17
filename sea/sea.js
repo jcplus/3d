@@ -27,7 +27,7 @@
  * the accumulated foam along it. Convergent chop then gathers the foam into
  * the streaky downwind webbing of a worked sea instead of static blooms.
  *
- * Version: 0.12.0
+ * Version: 0.12.1
  */
 
 import * as THREE from 'three';
@@ -36,7 +36,7 @@ import { config, getters } from './config.js';
 import { FFTOcean, SWELL_GLSL, windGain } from './fft.js';
 import { ShallowWater } from './swe.js';
 import { SpraySystem } from './spray.js';
-import { SWE_ORIGIN, SWE_SIZE } from './terrain.js';
+import { SWE_ORIGIN, SWE_SIZE, TERRAIN_GLSL } from './terrain.js';
 
 export class Ocean {
     constructor(renderer, scene) {
@@ -214,6 +214,8 @@ export class Ocean {
             uniform float uAmpNorm;
             uniform vec2 uWindDir;
 
+            ${TERRAIN_GLSL}
+
             void main() {
                 vec2 uv = gl_FragCoord.xy / resolution.xy;
 
@@ -268,9 +270,11 @@ export class Ocean {
                         vec4 sw = texture2D(uSweTexture, sUv);
                         float depth = sw.x;
                         float speed = length(sw.yz);
-                        float breaking = smoothstep(0.25, 1.4, speed) * smoothstep(3.0, 0.16, depth);
-                        float swash = smoothstep(0.015, 0.16, depth) * smoothstep(1.0, 0.14, depth);
-                        generation += clamp(breaking + swash * 0.8, 0.0, 1.0) * 0.18 * uSweFoam;
+                        float bed = terrainHeight(worldPos);
+                        float shelfMask = smoothstep(-30.0, -5.5, bed);
+                        float breaking = smoothstep(0.25, 1.4, speed) * (1.0 - smoothstep(0.16, 3.0, depth));
+                        float swash = smoothstep(0.015, 0.16, depth) * (1.0 - smoothstep(0.14, 1.0, depth));
+                        generation += clamp(breaking + swash * 0.8, 0.0, 1.0) * 0.18 * uSweFoam * shelfMask;
                     }
                 }
 
@@ -298,7 +302,7 @@ export class Ocean {
             uvAttr.setY(i, 1.0 - uvAttr.getY(i));
         }
 
-        const vertexShader = document.getElementById('ocean-vertex').textContent;
+        const vertexShader = document.getElementById('ocean-vertex').textContent.replace('//__TERRAIN__', TERRAIN_GLSL);
         const fragmentShader = document.getElementById('ocean-fragment').textContent;
 
         this.material = new THREE.ShaderMaterial({
