@@ -12,7 +12,7 @@
  *
  * Sea level is authored at world y = 0 (config.seaLevel sits the ocean there).
  *
- * Version: 0.1.1
+ * Version: 0.2.0
  */
 
 import * as THREE from 'three';
@@ -49,19 +49,41 @@ export const TERRAIN_GLSL = `
         return v;
     }
     float terrainHeight(vec2 p) {
-        // Far-field deep seabed
-        float deep = -130.0 + tFbm(p * 0.012) * 16.0;
-        // Cross-shore beach profile: deep on -x, rising to dry land on +x
-        float beach = mix(-24.0, 17.0, smoothstep(-170.0, 150.0, p.x));
-        beach += 1.6 * sin(p.y * 0.03) + 1.2 * sin(p.x * 0.05 + 1.7);
-        beach += tFbm(p * 0.03) * 1.2;
-        // Isolated tide pool on the upper beach: a bowl ringed by a raised rim
+        // Far-field seabed, kept well below the active near-shore shelf.
+        float deep = -95.0 + tFbm(p * 0.009) * 10.0;
+
+        // Organic island signed distance. Negative is dry island, positive is
+        // water. Low-frequency boundary noise breaks the old square shoreline.
+        vec2 islandC = vec2(115.0, -25.0);
+        vec2 q = (p - islandC) / vec2(118.0, 178.0);
+        float boundary = tFbm(p * 0.018 + vec2(4.1, 2.3)) * 0.16
+                       + tFbm(p * 0.041 - vec2(1.7, 5.2)) * 0.055;
+        float sd = length(q) - 1.0 + boundary;
+
+        // Radial bathymetry: deep ocean -> reef shelf -> beach -> inland.
+        // This gives gradual depth bands around the island instead of a flat
+        // rectangular shallow patch.
+        float shelfT = 1.0 - smoothstep(0.42, 1.55, sd);
+        float beachT = 1.0 - smoothstep(-0.08, 0.20, sd);
+        float inlandT = 1.0 - smoothstep(-0.62, -0.18, sd);
+        float shelf = mix(-28.0, -2.2, shelfT);
+        float beach = mix(shelf, 2.2, beachT);
+        beach = mix(beach, 14.0, inlandT);
+
+        // Alongshore bars, channels and small sand ripples.
+        float bars = sin(sd * 34.0 + tFbm(p * 0.022) * 3.0) * 0.9 * (1.0 - smoothstep(0.05, 1.25, sd));
+        float channels = -3.5 * (1.0 - smoothstep(0.10, 0.55, abs(tFbm(p * 0.015 + 9.0)))) * (1.0 - smoothstep(0.25, 1.35, sd)) * smoothstep(-0.08, 0.28, sd);
+        beach += bars + channels + tFbm(p * 0.075) * mix(0.6, 2.2, inlandT);
+
+        // Isolated tide pool on the upper beach: a bowl ringed by a raised rim.
         vec2 poolC = vec2(85.0, -70.0);
         float pr = length(p - poolC);
-        beach += -18.0 * (1.0 - smoothstep(0.0, 30.0, pr));
-        beach += 5.0 * exp(-pow((pr - 34.0) / 7.0, 2.0));
-        // Keep the shore local; relax back to the deep floor beyond the disc
-        float local = 1.0 - smoothstep(200.0, 380.0, length(p));
+        beach += -12.0 * (1.0 - smoothstep(0.0, 28.0, pr)) * (1.0 - smoothstep(-0.08, 0.22, sd));
+        beach += 4.0 * exp(-pow((pr - 33.0) / 7.0, 2.0));
+
+        // Keep the authored island local; relax to the deep floor in the far
+        // field so the camera-following seabed skirt remains cheap.
+        float local = 1.0 - smoothstep(360.0, 620.0, length(p - islandC));
         return mix(deep, beach, local);
     }
 `;
@@ -77,12 +99,62 @@ export function terrainHeightJS(x, z) {
         t = Math.min(Math.max((t - a) / (b - a), 0), 1);
         return t * t * (3 - 2 * t);
     };
-    const deep = -130.0;
-    let beach = -24.0 + 41.0 * sm(-170.0, 150.0, x);
-    beach += 1.6 * Math.sin(z * 0.03) + 1.2 * Math.sin(x * 0.05 + 1.7);
+    const fract = (v) => v - Math.floor(v);
+    const hash = (ix, iz) => {
+        let px = fract(ix * 123.34);
+        let pz = fract(iz * 345.45);
+        const d = px * (px + 34.345) + pz * (pz + 34.345);
+        px += d;
+        pz += d;
+        return fract(px * pz) * 2 - 1;
+    };
+    const noise = (px, pz) => {
+        const ix = Math.floor(px);
+        const iz = Math.floor(pz);
+        const fx = px - ix;
+        const fz = pz - iz;
+        const ux = fx * fx * (3 - 2 * fx);
+        const uz = fz * fz * (3 - 2 * fz);
+        const a = hash(ix, iz);
+        const b = hash(ix + 1, iz);
+        const c = hash(ix, iz + 1);
+        const d = hash(ix + 1, iz + 1);
+        return (a * (1 - ux) + b * ux) * (1 - uz) + (c * (1 - ux) + d * ux) * uz;
+    };
+    const fbm = (px, pz) => {
+        let v = 0;
+        let a = 0.5;
+        for (let i = 0; i < 4; i++) {
+            v += a * noise(px, pz);
+            px *= 2;
+            pz *= 2;
+            a *= 0.5;
+        }
+        return v;
+    };
+
+    const deep = -95.0 + fbm(x * 0.009, z * 0.009) * 10.0;
+    const cx = 115.0;
+    const cz = -25.0;
+    const qx = (x - cx) / 118.0;
+    const qz = (z - cz) / 178.0;
+    const boundary = fbm(x * 0.018 + 4.1, z * 0.018 + 2.3) * 0.16
+        + fbm(x * 0.041 - 1.7, z * 0.041 - 5.2) * 0.055;
+    const sd = Math.hypot(qx, qz) - 1.0 + boundary;
+    const shelfT = 1.0 - sm(0.42, 1.55, sd);
+    const beachT = 1.0 - sm(-0.08, 0.20, sd);
+    const inlandT = 1.0 - sm(-0.62, -0.18, sd);
+    const shelf = -28.0 * (1 - shelfT) + -2.2 * shelfT;
+    let beach = shelf * (1 - beachT) + 2.2 * beachT;
+    beach = beach * (1 - inlandT) + 14.0 * inlandT;
+    beach += Math.sin(sd * 34.0 + fbm(x * 0.022, z * 0.022) * 3.0) * 0.9 * (1.0 - sm(0.05, 1.25, sd));
+    beach += -3.5 * (1.0 - sm(0.10, 0.55, Math.abs(fbm(x * 0.015 + 9.0, z * 0.015 + 9.0)))) * (1.0 - sm(0.25, 1.35, sd)) * sm(-0.08, 0.28, sd);
+    beach += fbm(x * 0.075, z * 0.075) * (0.6 * (1 - inlandT) + 2.2 * inlandT);
+
     const pr = Math.hypot(x - 85.0, z + 70.0);
-    beach += -18.0 * (1.0 - sm(0.0, 30.0, pr));
-    beach += 5.0 * Math.exp(-Math.pow((pr - 34.0) / 7.0, 2.0));
-    const local = 1.0 - sm(200.0, 380.0, Math.hypot(x, z));
+    beach += -12.0 * (1.0 - sm(0.0, 28.0, pr)) * (1.0 - sm(-0.08, 0.22, sd));
+    beach += 4.0 * Math.exp(-Math.pow((pr - 33.0) / 7.0, 2.0));
+
+    const local = 1.0 - sm(360.0, 620.0, Math.hypot(x - cx, z - cz));
     return deep * (1.0 - local) + beach * local;
 }

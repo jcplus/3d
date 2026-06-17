@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="version" content="0.9.0">
+    <meta name="version" content="0.11.0">
     <title>Real-Time Ocean Simulation</title>
     <style>
         * {
@@ -258,6 +258,26 @@
             }
             return sqrt(f2) - sqrt(f1);
         }
+
+        float foamLace(vec2 worldXZ, vec2 windDir, float time) {
+            vec2 crossWind = vec2(-windDir.y, windDir.x);
+            vec2 laneUv = vec2(dot(worldXZ, windDir), dot(worldXZ, crossWind));
+            float broad = snoise(laneUv * vec2(0.012, 0.028) + vec2(time * 0.025, 3.1));
+            float medium = snoise(laneUv * vec2(0.035, 0.075) - vec2(time * 0.055, 1.7));
+            float warp = broad * 5.5 + medium * 1.8;
+            vec2 warped = worldXZ + windDir * warp + crossWind * medium * 2.5;
+
+            float largeCells = cellularEdge(warped * 0.045 + windDir * time * 0.045);
+            float midCells = cellularEdge(warped * 0.095 + vec2(7.2, 3.4) + windDir * time * 0.10);
+            float fineCells = cellularEdge(warped * 0.19 + vec2(2.6, 11.8) - windDir * time * 0.16);
+
+            float largeMask = smoothstep(-0.55, 0.35, broad);
+            float fineMask = smoothstep(0.15, 0.85, medium);
+            float large = smoothstep(0.26, 0.055, largeCells) * largeMask;
+            float mid = smoothstep(0.19, 0.045, midCells);
+            float fine = smoothstep(0.13, 0.032, fineCells) * fineMask;
+            return clamp(max(large * 0.95, mid * 0.72) + fine * 0.34, 0.0, 1.0);
+        }
         
         void main() {
             vec3 viewDir = normalize(uCameraPosition - vWorldPosition);
@@ -356,8 +376,8 @@
             // tear noise jitters it for a hand-drawn edge.
             float crestCut = (0.82 - 0.62 * uFoamThreshold) + (tear - 0.5) * 0.18;
             float accCut = 0.72 - 0.44 * uFoamThreshold;
-            float cells = cellularEdge(vWorldPosition.xz * 0.105 + uWindDir * uTime * 0.12);
-            float lace = smoothstep(0.20, 0.045, cells) * smoothstep(accCut * 0.45, accCut + 0.16, foamAcc);
+            float lace = foamLace(vWorldPosition.xz, normalize(uWindDir), uTime)
+                       * smoothstep(accCut * 0.42, accCut + 0.16, foamAcc);
             vec2 wuv = vec2(dot(vWorldPosition.xz, normalize(uWindDir)) * 0.18,
                             dot(vWorldPosition.xz, vec2(-uWindDir.y, uWindDir.x)) * 0.75);
             float windTear = smoothstep(-0.25, 0.55, snoise(wuv + vec2(uTime * 0.22, 0.0)));
@@ -472,23 +492,62 @@
             return md;
         }
         
-        // Triplanar mapping helper
-        vec4 triplanarSample(vec3 pos, vec3 normal, vec4 cX, vec4 cY, vec4 cZ) {
-            vec3 blend = abs(normal);
-            blend = max(blend - 0.2, 0.0);
-            blend /= blend.x + blend.y + blend.z;
-            return cX * blend.x + cY * blend.y + cZ * blend.z;
+        float valueNoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash2(i).x;
+            float b = hash2(i + vec2(1.0, 0.0)).x;
+            float c = hash2(i + vec2(0.0, 1.0)).x;
+            float d = hash2(i + vec2(1.0, 1.0)).x;
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+        }
+
+        float fbm2(vec2 p) {
+            float v = 0.0;
+            float a = 0.5;
+            for (int i = 0; i < 4; i++) {
+                v += valueNoise(p) * a;
+                p *= 2.03;
+                a *= 0.5;
+            }
+            return v;
         }
         
         void main() {
-            // Base colors
-            vec3 sandColor = vec3(0.76, 0.70, 0.50);
-            vec3 rockColor = vec3(0.35, 0.35, 0.35);
-            vec3 deepColor = vec3(0.1, 0.15, 0.2);
-            
-            // Mix based on height and slope
             float slope = 1.0 - abs(vNormal.y);
-            vec3 baseColor = mix(sandColor, rockColor, slope);
+            float height = vWorldPosition.y - uSeaLevel;
+            float grain = fbm2(vWorldPosition.xz * 0.075);
+            float coarse = fbm2(vWorldPosition.xz * 0.022 + 8.4);
+
+            vec3 deepColor = vec3(0.06, 0.16, 0.22);
+            vec3 wetSand = vec3(0.50, 0.43, 0.31);
+            vec3 paleSand = vec3(0.78, 0.70, 0.50);
+            vec3 drySand = vec3(0.86, 0.77, 0.54);
+            vec3 hardSoil = vec3(0.42, 0.34, 0.23);
+            vec3 softSoil = vec3(0.28, 0.36, 0.20);
+            vec3 rockColor = vec3(0.30, 0.31, 0.29);
+            vec3 vegetation = vec3(0.18, 0.34, 0.16);
+
+            // Material zones: underwater sand, wet beach, dry sand, hard soil,
+            // rocky slopes and patchy vegetation. Noise jitters the thresholds
+            // so the island does not read as a single painted blob.
+            float wetT = smoothstep(-0.5, 0.7, height);
+            float dryT = smoothstep(1.0, 4.2, height + (grain - 0.5) * 1.2);
+            float soilT = smoothstep(3.5, 9.0, height + (coarse - 0.5) * 3.0);
+            float vegT = smoothstep(6.5, 11.0, height + (grain - 0.5) * 2.2)
+                       * smoothstep(0.72, 0.18, slope)
+                       * smoothstep(0.38, 0.72, coarse);
+            float rockT = smoothstep(0.18, 0.55, slope)
+                        + smoothstep(10.0, 16.0, height) * 0.45;
+
+            vec3 baseColor = mix(paleSand, wetSand, 1.0 - wetT);
+            baseColor = mix(baseColor, drySand, dryT);
+            baseColor = mix(baseColor, hardSoil, soilT * 0.65);
+            baseColor = mix(baseColor, softSoil, soilT * (1.0 - rockT) * 0.45);
+            baseColor = mix(baseColor, vegetation, clamp(vegT, 0.0, 0.85));
+            baseColor = mix(baseColor, rockColor, clamp(rockT, 0.0, 0.85));
+            baseColor *= 0.88 + grain * 0.24;
             
             // Caustics projection
             vec2 causticCoord = vWorldPosition.xz * 0.1;
@@ -512,16 +571,6 @@
             float depth = uSeaLevel - vWorldPosition.y;
             float absorption = exp(-depth * 0.02);
             baseColor = mix(deepColor, baseColor, absorption);
-
-            // Above the waterline: wet sand near the line, dry sand higher,
-            // dune grass on the upper beach. The ocean surface fades to
-            // transparent here, so this is what the eye actually reads.
-            float aboveT = smoothstep(uSeaLevel - 0.4, uSeaLevel + 1.2, vWorldPosition.y);
-            vec3 wetSand = vec3(0.52, 0.45, 0.33);
-            vec3 drySand = vec3(0.83, 0.75, 0.55);
-            vec3 landColor = mix(wetSand, drySand, smoothstep(uSeaLevel + 0.3, uSeaLevel + 3.5, vWorldPosition.y));
-            landColor = mix(landColor, vec3(0.34, 0.42, 0.24), smoothstep(8.0, 14.0, vWorldPosition.y) * 0.7);
-            baseColor = mix(baseColor, landColor, aboveT);
 
             // Distance fog: dissolve into the same sky-horizon backdrop the
             // ocean fades to, so the floor reads as infinite with no visible

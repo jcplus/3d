@@ -1008,6 +1008,20 @@ v0 = normalise(reflect(waveVel, reefNormal) + reefNormal * burstBias) * burst
 
 因此水花只在真正迎浪撞击礁石时增强，而不是单纯随浪高随机喷发。
 
+### 17.5 岛屿地形与材质分层
+
+旧近岸地形是 cross-shore 方形 patch，俯视时会读成同深度的矩形浅水块。现行地形改为
+以有噪声扰动的椭圆 SDF 表示岛屿：
+
+```
+sd = length((p - islandCentre) / islandRadius) - 1 + boundaryNoise
+height = deepOcean -> reefShelf -> wetBeach -> inland
+```
+
+深度随 `sd` 分带渐进，并叠加沿岸沙坝、冲沟和小尺度起伏；SWE 与渲染仍采同一个
+`terrainHeight`。海底 fragment shader 不再只按 slope 混沙/石，而是按高度、坡度和噪声混合
+湿沙、干沙、硬土、软土、岩石与植被，让水线、沙滩、内陆和陡坡都有不同材质。
+
 ---
 
 ## 附录：数学常数
