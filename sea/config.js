@@ -1,330 +1,81 @@
 /**
- * config.js - Central State Management
+ * config.js - Native WebGPU water configuration
  *
- * Uses Proxy-based reactive state management.
- * All modules read from this single source of truth.
- *
- * Version: 0.12.0
+ * Version: 1.0.0
  */
 
-import * as THREE from 'three';
-
-// Default configuration
 const defaultConfig = {
-    // Geometry settings
-    seaLevel: 0.0,
-    seabedLevel: -200.0,
-    
-    // Wave physics (FFT spectral ocean parameters)
-    windDirection: 15.0, // Degrees (0-360)
-    windSpeed: 22.0,     // Drives the Phillips spectrum shape (peak wavelength)
-    choppiness: 1.7,     // Horizontal displacement scale; pinches crests into sharp cusps (>~2.0 over-folds)
-    crestLean: 0.4,      // Stylised forward-lean: pitches crests downwind for a steep front face
-    timeScale: 0.75,
-
-    // FFT spectrum
-    waveHeight: 2.8,        // RMS surface height in metres at 22 m/s wind; scales with wind squared
-    chopAmount: 0.85,        // High-frequency normal detail injected in the fragment shader
-    detailPatchiness: 0.7,  // Wind-lane modulation of the detail ripples (0 = uniform carpet)
-    swellDirSpread: 6.0,    // Directional spread exponent at the spectral peak; higher = longer crests
-    rippleSuppress: 0.8,    // Metre-scale spectrum cutoff; drains uniform micro-chop from the normals
-    fftPatchSize: 420.0,    // Physical side of the periodic FFT tile (m); longest wave it can hold
-    fftResolution: 256,     // FFT grid is fftResolution^2 (power of two; refresh to apply)
-    longWaveStrength: 1.25,     // Low-frequency FFT cascade mixed under the main sea (0 disables)
-    longWavePatchSize: 1400.0,  // Physical side of the slow long-wave tile (m)
-    longWaveSpeedScale: 0.48,   // Slows the low-frequency cascade for heavier ocean timing
-
-    // Macro swell: analytic Gerstner components far longer than the FFT patch,
-    // layered under the spectral field so the whole surface heaves and rolls.
-    // Amplitude is quoted at the reference wind (22 m/s) and scales with the
-    // square of the wind speed, the same gain the FFT field uses.
-    swellAmplitude: 2.6,    // Combined crest height of the macro swell (m); 0 disables
-    swellWavelength: 620.0, // Primary component wavelength (m); secondaries derive from it
-    swellDirection: 25.0,   // Travel direction in degrees (kept near the wind for coherence)
-    swellSteepness: 0.6,    // Trochoid sharpening 0-1; horizontal drift toward the crests
-
-    // Tide: a slow time-driven oscillation of the whole water level. Real
-    // tides are astronomical (time-determined), so this is a pure sinusoid
-    // of simulation time with a demo-scale period instead of 12 hours.
-    tideAmplitude: 1.0,     // Water-level half-range in metres; 0 disables
-    tidePeriod: 240.0,      // Full flood-to-flood cycle in simulation seconds
-
-    // Foam physics
-    foamDecay: 0.975,
-    foamThreshold: 0.62, // Range: 0.6 - 0.9 (Higher = more foam generated but higher cutoff for display)
-    foamGrowth: 3.4,
-    foamStreak: 2.5,    // Downwind advection strength for lingering foam trails
-
-    // Stylised shading
-    sssStrength: 1.4,        // Directional translucency through backlit crests
-    sssColor: 0xcaf7fd,      // Near-white cyan the backlit crest band swings towards
-    specPower: 40.0,         // Specular exponent; lower = wider highlight band
-    specIntensity: 0.45,     // Specular brightness
-    waterContrast: 0.55,     // How far shadowed flanks swing towards the shadow swatch
-
-    // Atmosphere
-    skyColorZenith: 0x37b1d3,
-    skyColorHorizon: 0x86e7f5,
-    fogDensity: 0.0011,
-
-    // Near-shore shallow water (L2): a fixed patch at the world origin with a
-    // beach and an isolated tide pool (see terrain.js / swe.js)
-    sweEnabled: true,
-    sweSubsteps: 4,        // Pipe-model substeps per frame (CFL stability)
-    sweDrag: 0.38,         // Velocity damping; higher = water settles faster
-    sweCoupling: 1.0,      // Open-ocean swell injected at the deep boundary
-    sweFoam: 2.0,          // Shore wash / breaker foam strength
-    sweResolution: 256,    // SWE grid resolution (refresh to apply)
-
-    // Wave-strike spray (L3): GPGPU particle pool thrown off the reefs when
-    // the open-ocean swell breaks against them (see spray.js)
-    sprayEnabled: true,
-    sprayBirthRate: 12.0,        // Respawn attempts per dead particle per second
-    spraySpawnThreshold: 0.85,   // Crest height over sea level needed to erupt (m)
-    spraySpeed: 9.0,            // Burst speed at birth (horizontal; vertical x1.6)
-    sprayGravity: 22.0,         // Downward acceleration on airborne droplets
-    sprayDrag: 0.25,           // Air drag; higher = droplets slow faster
-    sprayLife: 1.6,            // Maximum droplet lifetime (seconds)
-    spraySize: 7.0,            // Billboard point size
-    sprayFoam: 1.0,            // Foam left where spray takes off and lands
-    sprayPoolRes: 128,         // Particle pool is sprayPoolRes^2 (refresh to apply)
-
-    // Visual settings: a four-swatch cel palette sampled from the target
-    // frame. Bands pick between swatches directly (no value multipliers),
-    // so these hex values are exactly what reaches the screen pre-fog.
-    waterColorDeep: 0x139ec7,     // Trough / dark patch swatch
-    waterColorMid: 0x27c9e7,      // Dominant base swatch
-    waterColorShallow: 0x76dff3,  // Lit slope swatch (ramp high end)
-    waterColorShadow: 0x52add6,   // Desaturated blue of shadowed wave faces
-    foamColor: 0xf4fbfe,          // Whitecap / lacing fill
-    sunPosition: { x: 100, y: 200, z: 100 },
-    
-    // Grid settings
-    gridSize: 1500,
-    gridResolution: 768,
-    
-    // Camera settings
-    cameraStartHeight: 100,
-    cameraMinHeight: 1.0,
-    cameraMoveSpeed: 200.0,
-    cameraPanSpeed: 200.0,
+    webgpuScene: 'shore',
+    webgpuView: 'surface',
+    webgpuQuality: 'balanced',
+    webgpuRenderScale: 1.0,
+    webgpuFixedTime: -1,
+    cameraMoveSpeed: 42.0,
     cameraLookSpeed: 0.002,
-    
-    // Internal state (not exposed to UI)
     time: 0,
     deltaTime: 0,
 };
 
-// Listeners for reactive updates
 const listeners = new Map();
 
-// The reactive config object
-// (deep clone so nested objects like sunPosition don't share references with defaults)
 export const config = new Proxy(structuredClone(defaultConfig), {
     set(target, property, value) {
         const oldValue = target[property];
         target[property] = value;
-        
-        // Notify listeners
-        if (listeners.has(property)) {
-            const callbacks = listeners.get(property);
-            callbacks.forEach(cb => cb(value, oldValue));
-        }
-        
+        listeners.get(property)?.forEach((callback) => callback(value, oldValue));
         return true;
     },
-    
-    get(target, property) {
-        return target[property];
-    }
 });
 
-/**
- * Subscribe to config changes
- * @param {string} property - Config property to watch
- * @param {Function} callback - Callback(newValue, oldValue)
- * @returns {Function} Unsubscribe function
- */
 export function subscribe(property, callback) {
-    if (!listeners.has(property)) {
-        listeners.set(property, new Set());
-    }
+    if (!listeners.has(property)) listeners.set(property, new Set());
     listeners.get(property).add(callback);
-    
-    return () => {
-        const callbacks = listeners.get(property);
-        if (callbacks) {
-            callbacks.delete(callback);
-        }
-    };
+    return () => listeners.get(property)?.delete(callback);
 }
 
-/**
- * Batch update multiple config values
- * @param {Object} updates - Object with property:value pairs
- */
 export function batchUpdate(updates) {
-    Object.entries(updates).forEach(([key, value]) => {
-        config[key] = value;
-    });
+    Object.entries(updates).forEach(([key, value]) => { config[key] = value; });
 }
 
-/**
- * Reset config to defaults
- */
-export function resetConfig() {
-    Object.keys(defaultConfig).forEach(key => {
-        if (key !== 'time' && key !== 'deltaTime') {
-            config[key] = structuredClone(defaultConfig[key]);
-        }
-    });
-}
+const STORAGE_KEY = 'sea_webgpu_config';
+const CONFIG_VERSION = '1.0.0';
 
-// === localStorage persistence (migrated from sea_surface) ===
-
-const STORAGE_KEY = 'sea_gpu_config';
-const CONFIG_VERSION = '0.12.0';
-
-/**
- * Save current config to localStorage (time/deltaTime excluded)
- */
 export function saveConfigToStorage() {
     try {
         const out = { __version: CONFIG_VERSION };
-        Object.keys(defaultConfig).forEach(key => {
-            if (key !== 'time' && key !== 'deltaTime') {
-                out[key] = config[key];
-            }
+        Object.keys(defaultConfig).forEach((key) => {
+            if (key !== 'time' && key !== 'deltaTime') out[key] = config[key];
         });
         localStorage.setItem(STORAGE_KEY, JSON.stringify(out));
-    } catch (e) {
-        console.warn('Failed to save config:', e);
+    } catch (error) {
+        console.warn('Failed to save configuration:', error);
     }
 }
 
-/**
- * Remove saved config so defaults apply on next load
- */
 export function clearSavedConfig() {
     try {
         localStorage.removeItem(STORAGE_KEY);
-    } catch (e) {
-        console.warn('Failed to clear saved config:', e);
+    } catch (error) {
+        console.warn('Failed to clear configuration:', error);
     }
 }
 
-// Apply saved overrides on startup. Runs at module load, before other
-// modules attach listeners, so no spurious notifications fire.
 (function loadSavedConfig() {
+    if (typeof localStorage === 'undefined') return;
     try {
-        const saved = localStorage.getItem(STORAGE_KEY);
-        if (!saved) return;
-        const parsed = JSON.parse(saved);
-        if (parsed.__version !== CONFIG_VERSION) return;
-        Object.keys(parsed).forEach(key => {
-            if (key in defaultConfig && key !== 'time' && key !== 'deltaTime') {
-                config[key] = parsed[key];
-            }
+        const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+        if (saved?.__version !== CONFIG_VERSION) return;
+        Object.keys(defaultConfig).forEach((key) => {
+            if (key in saved && key !== 'time' && key !== 'deltaTime') config[key] = saved[key];
         });
-    } catch (e) {
-        console.warn('Failed to load saved config:', e);
+    } catch (error) {
+        console.warn('Failed to load configuration:', error);
     }
-})();
+}());
 
-/**
- * Update time-related config values
- * Call this each frame
- * @param {number} deltaTime - Time since last frame in seconds
- */
 export function updateTime(deltaTime) {
     config.deltaTime = deltaTime;
-    config.time += deltaTime * config.timeScale;
+    config.time += deltaTime;
 }
 
-/**
- * Get uniform-compatible object for shaders
- * This creates a snapshot of config values suitable for uniforms
- */
-export function getUniforms() {
-    return {
-        uSeaLevel: { value: config.seaLevel },
-        uSeabedLevel: { value: config.seabedLevel },
-        uChoppiness: { value: config.choppiness },
-        uTime: { value: config.time },
-        uWindSpeed: { value: config.windSpeed },
-        uWindDirection: { value: getters.windVector },
-        uWaterColorDeep: { value: getters.waterColorDeepColor },
-        uWaterColorShallow: { value: getters.waterColorShallowColor },
-        uSunPosition: { value: getters.sunPositionVector },
-        uFoamThreshold: { value: config.foamThreshold },
-        uCameraPosition: { value: new THREE.Vector3() },
-    };
-}
-
-// Export default config for reference
 export { defaultConfig };
-
-// Convenience getters
-export const getters = {
-    get effectiveSeabedLevel() {
-        return config.seabedLevel;
-    },
-    
-    get cameraStartY() {
-        return config.seaLevel + config.cameraStartHeight;
-    },
-    
-    get gridWorldSize() {
-        return config.gridSize;
-    },
-    
-    get patchSize() {
-        return config.gridSize / config.gridResolution;
-    },
-
-    get windVector() {
-        const rad = config.windDirection * Math.PI / 180;
-        return new THREE.Vector2(Math.cos(rad), Math.sin(rad));
-    },
-
-    get swellVector() {
-        const rad = config.swellDirection * Math.PI / 180;
-        return new THREE.Vector2(Math.cos(rad), Math.sin(rad));
-    },
-
-    get waterColorDeepColor() {
-        return new THREE.Color(config.waterColorDeep);
-    },
-
-    get waterColorShallowColor() {
-        return new THREE.Color(config.waterColorShallow);
-    },
-
-    get waterColorMidColor() {
-        return new THREE.Color(config.waterColorMid);
-    },
-
-    get waterColorShadowColor() {
-        return new THREE.Color(config.waterColorShadow);
-    },
-
-    get foamColorColor() {
-        return new THREE.Color(config.foamColor);
-    },
-
-    get sunPositionVector() {
-        return new THREE.Vector3(config.sunPosition.x, config.sunPosition.y, config.sunPosition.z);
-    },
-
-    get sssColorColor() {
-        return new THREE.Color(config.sssColor);
-    },
-
-    get skyZenithColor() {
-        return new THREE.Color(config.skyColorZenith);
-    },
-
-    get skyHorizonColor() {
-        return new THREE.Color(config.skyColorHorizon);
-    }
-};

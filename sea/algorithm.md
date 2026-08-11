@@ -1025,6 +1025,44 @@ height = deepOcean -> reefShelf -> beach -> grey-driven inland highland
 礁棚遮罩，因此不会把方形计算边界渲染成正方形岛屿或浅水块。海底 fragment shader 使用高度、坡度和
 多频噪声计算材质权重并归一化混合湿沙、干沙、硬土、软土、岩石与植被，避免地貌衔接处出现泾渭分明的硬边。水下焦散和吸收只乘到 `height < seaLevel` 的区域，陆地不会再被蓝绿色细胞状焦散覆盖。
 
+
+### 18. 基于事件的泡沫与低成本水体光学
+
+参考 `siliconjungle/inkwell-webgpu-water` 的可迁移原则，而不迁移其 WebGPU/Next.js 实现：
+泡沫必须先由模拟事件选择，再做视觉破碎；远处短波不能继续作为逐像素几何；水面需要同时保留
+透射和掠射反射。现有 WebGL2 管线按以下方式实现。
+
+泡沫累计纹理继续只接收 Jacobian 压缩、SWE 破碎/回洗与水花落点。显示阶段不再叠加独立的
+Voronoi 细胞图案；改以随风移动的三频 `fbm` 值移动阈值，且只在累计泡沫或即时 Jacobian 白帽
+已经成立时生效：
+
+```
+breakup = fbm(worldXZ, wind, time)
+whitecap = aaStep((1 - J) - crestCut + edgeJitter(breakup))
+trailing = aaStep(foamHistory - historyCut + edgeJitter(breakup))
+```
+
+`aaStep` 的宽度取 `fwidth(signal)`，所以近处得到清晰的咬合轮廓，远处仍有抗锯齿稳定性；
+噪声不再能在平静海面上制造泡沫。
+
+主海面顶点输出真实水柱深度 `d = max(surfaceY - terrainHeight, 0)`。片元阶段保留原赛璐璐色板，
+但用 Beer-Lambert 透射把浅水与深水连接起来：
+
+```
+T = exp(-absorption * d / max(N·V, 0.22))
+water = mix(deepSwatch, paletteWater, T)
+```
+
+再以 Schlick 近似介电 Fresnel 混合解析天空色：
+
+```
+F = 0.03 + 0.97 * (1 - N·V)^5
+final = mix(water, sky(reflect(-V, N)), F * reflectionStrength)
+```
+
+此方案不需要场景颜色复制或反射相机，适合当前静态 WebGL2 架构；它修复了旧材质完全禁用掠射
+天空反射、泡沫用独立细胞纹理铺满海面的失真数据流。
+
 ---
 
 ## 附录：数学常数
@@ -1038,3 +1076,12 @@ height = deepOcean -> reefShelf -> beach -> grey-driven inland highland
 ---
 
 *本文档算法独立于具体渲染引擎，可在 WebGL/Unity/Unreal/自定义渲染器中实现。*
+
+
+### 19. 原生 WebGPU 频谱、近岸与光学管线
+
+WebGL2 旧管线已由原生 WebGPU 实现取代。海面使用三个 128² TMA/JONSWAP 级联；长波和中波包含交叉涌浪。每帧进行频域演化和七阶段 Stockham 逆 FFT，同时生成位移、导数与 Jacobian。长中波驱动嵌套水面环，12 m 毛细重力带只进入距离相关的斜率 BRDF。
+
+岛屿近岸状态为 `(eta, qx, qz, foam)`。求解器做 hydrostatic 重建和 Rusanov 通量，使用 Manning 摩擦与频谱边界强迫。泡沫在近岸速度场中回溯、扩散和衰减；出生源仅包括频谱压缩、Froude 破碎和动态岸线。持久破浪事件场把这些物理条件转成局部破浪网格的激活掩码。
+
+水面在岛屿场景采样同帧捕获的颜色和深度纹理计算厚度折射。最终颜色组合 Beer-Lambert RGB 吸收、低能量体散射、精确介电 Fresnel 和 Cox-Munk 各向异性太阳闪光。此数据流避免把独立纹理图案直接覆盖到水面。
